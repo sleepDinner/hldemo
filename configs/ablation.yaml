@@ -1,0 +1,42 @@
+experiment:
+  name: rfb_traceformer_ablation
+  task: image_manipulation_localization
+  output_dir: outputs/ablation
+
+seed: 2026
+
+base_config: configs/train_casia.yaml
+
+ablations:
+  - name: rgb_only
+    overrides:
+      model.use_frequency_branch: false
+      model.use_global_block: false
+      model.use_boundary_head: false
+  - name: rgb_plus_frequency
+    overrides:
+      model.use_frequency_branch: true
+      model.use_global_block: false
+      model.use_boundary_head: false
+  - name: rgb_frequency_global
+    overrides:
+      model.use_frequency_branch: true
+      model.use_global_block: true
+      model.use_boundary_head: false
+  - name: full_model
+    overrides:
+      model.use_frequency_branch: true
+      model.use_global_block: true
+      model.use_boundary_head: true
+
+metrics:
+  threshold: 0.5
+  report:
+    - f1
+    - iou
+    - auc
+    - precision
+    - recall
+    - mcc
+    - fpr
+

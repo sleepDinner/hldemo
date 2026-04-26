@@ -1,0 +1,78 @@
+experiment:
+  name: cross_dataset_test
+  task: image_manipulation_localization
+  output_dir: outputs/cross_dataset_test
+
+seed: 2026
+
+device:
+  accelerator: cuda
+  num_workers: 4
+  pin_memory: true
+
+checkpoint:
+  path: outputs/train_casia/checkpoints/best.pth
+
+data:
+  input_size: [512, 512]
+  batch_size: 1
+  normalize:
+    mean: [0.485, 0.456, 0.406]
+    std: [0.229, 0.224, 0.225]
+  test_sets:
+    - name: Columbia
+      image_dir: data/Columbia/images
+      mask_dir: data/Columbia/masks
+      recursive: false
+      strict_pairs: true
+    - name: COVERAGE
+      image_dir: data/COVERAGE/images
+      mask_dir: data/COVERAGE/masks
+      recursive: false
+      strict_pairs: true
+    - name: NIST16
+      image_dir: data/NIST16/images
+      mask_dir: data/NIST16/masks
+      recursive: false
+      strict_pairs: true
+    - name: IMD2020
+      image_dir: data/IMD2020/images
+      mask_dir: data/IMD2020/masks
+      recursive: false
+      strict_pairs: true
+    - name: CASIA1
+      image_dir: data/CASIA1/images
+      mask_dir: data/CASIA1/masks
+      recursive: false
+      strict_pairs: true
+    - name: CASIA2
+      image_dir: data/CASIA2/images
+      mask_dir: data/CASIA2/masks
+      recursive: false
+      strict_pairs: true
+    - name: CASIA-D
+      image_dir: data/CASIA-D/images
+      mask_dir: data/CASIA-D/masks
+      recursive: false
+      strict_pairs: true
+
+model:
+  name: tamper_net
+  in_channels: 3
+  base_channels: 32
+  decoder_channels: 64
+  use_frequency_branch: true
+  use_global_block: true
+  use_boundary_head: true
+  global_blocks: 2
+
+metrics:
+  threshold: 0.5
+  max_auc_pixels: 200000
+  save_visualizations: true
+
+robustness:
+  enabled: true
+  jpeg_quality: [95, 75, 50, 30]
+  resize_scale: [0.5, 0.75, 1.5]
+  gaussian_blur_kernel: [3, 5]

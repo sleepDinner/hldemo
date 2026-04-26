@@ -1,0 +1,76 @@
+experiment:
+  name: cross_dataset_test_manifest
+  task: image_manipulation_localization
+  output_dir: outputs/cross_dataset_test_manifest
+
+seed: 2026
+
+device:
+  accelerator: cuda
+  num_workers: 4
+  pin_memory: true
+
+checkpoint:
+  path: outputs/train_casia_d_manifest/checkpoints/best.pth
+
+data:
+  input_size: [512, 512]
+  batch_size: 1
+  augmentation:
+    test:
+      random_crop: false
+      hflip_prob: 0.0
+      vflip_prob: 0.0
+  normalize:
+    mean: [0.485, 0.456, 0.406]
+    std: [0.229, 0.224, 0.225]
+  test_sets:
+    - name: COVERAGE
+      manifest_file: /data1/data/local/COVERAGE/COVERAGE_revised_img_mask_cls.txt
+      manifest_separator: " # "
+      include_authentic: false
+    - name: Columbia
+      manifest_file: /data1/data/local/Columbia/Columbia_revised_img_mask_cls.txt
+      manifest_separator: " # "
+      include_authentic: false
+    - name: IMD2020
+      manifest_file: /data1/data/local/IMD2020/IMD2020_revised_img_mask_cls.txt
+      manifest_separator: " # "
+      include_authentic: false
+    - name: NIST16
+      manifest_file: /data1/data/local/NIST16/NIST16_revised_img_mask_cls.txt
+      manifest_separator: " # "
+      include_authentic: false
+    - name: CASIA1
+      manifest_file: /data1/data/local/CASIA1.0/CASIA1.0_img_mask_cls.txt
+      manifest_separator: " # "
+      include_authentic: false
+    - name: CASIA2
+      manifest_file: /data1/data/local/CASIA2.0/CASIA2.0_revised_img_mask_cls.txt
+      manifest_separator: " # "
+      include_authentic: false
+    - name: CASIA-D
+      manifest_file: /data1/data/local/CASIA-D/CASIA-D_val_img_mask_cls.txt
+      manifest_separator: " # "
+      include_authentic: false
+
+model:
+  name: tamper_net
+  in_channels: 3
+  base_channels: 32
+  decoder_channels: 64
+  use_frequency_branch: true
+  use_global_block: true
+  use_boundary_head: true
+  global_blocks: 2
+
+metrics:
+  threshold: 0.5
+  max_auc_pixels: 200000
+  save_visualizations: true
+
+robustness:
+  enabled: true
+  jpeg_quality: [95, 75, 50, 30]
+  resize_scale: [0.5, 0.75, 1.5]
+  gaussian_blur_kernel: [3, 5]
