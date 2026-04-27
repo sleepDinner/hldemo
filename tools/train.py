@@ -44,7 +44,24 @@ def setup_distributed():
 
     local_rank = int(os.environ.get("LOCAL_RANK", "0"))
     rank = int(os.environ.get("RANK", "0"))
-    torch.cuda.set_device(local_rank)
+
+    if not torch.cuda.is_available():
+        raise RuntimeError(
+            "Distributed training was launched with torchrun, but CUDA is not available. "
+            "In your current error this usually means the installed PyTorch CUDA build is newer "
+            "than the NVIDIA driver. Run `python -m tools.check_environment`, then install a "
+            "driver-compatible PyTorch build such as cu121, or upgrade the NVIDIA driver."
+        )
+
+    try:
+        torch.cuda.set_device(local_rank)
+    except RuntimeError as exc:
+        raise RuntimeError(
+            "Failed to initialize CUDA for distributed training. Check whether PyTorch's CUDA "
+            "build matches the server NVIDIA driver. Run `python -m tools.check_environment` "
+            "for diagnostics."
+        ) from exc
+
     dist.init_process_group(backend="nccl", init_method="env://")
     return True, local_rank, rank, world_size
 

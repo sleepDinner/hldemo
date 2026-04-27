@@ -71,6 +71,23 @@ scripts/
 pip install -r requirements.txt
 ```
 
+Server CUDA note:
+
+If the server reports `The NVIDIA driver on your system is too old (found version 12020)`, the installed PyTorch wheel was built for a newer CUDA runtime than the driver supports. On this server, prefer the CUDA 12.1 PyTorch wheel:
+
+```bash
+pip uninstall -y torch torchvision torchaudio
+pip install -r requirements-cu121.txt
+pip install -r requirements.txt --no-deps
+python -m tools.check_environment
+```
+
+If CUDA is available after the check, run:
+
+```bash
+torchrun --nproc_per_node=2 -m tools.train --config configs/train_casia_manifest.yaml
+```
+
 依赖说明：
 
 - `torch` / `torchvision`：模型、训练和图像张量处理。
