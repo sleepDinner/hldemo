@@ -60,7 +60,10 @@ class TamperDataset(Dataset):
         if manifest_file:
             files.append(manifest_file)
         if manifest_files:
-            files.extend(manifest_files)
+            if isinstance(manifest_files, (str, Path)):
+                files.append(manifest_files)
+            else:
+                files.extend(manifest_files)
         return [Path(path) for path in files]
 
     def _build_samples(self):
@@ -173,9 +176,9 @@ class TamperDataset(Dataset):
 
     def _parse_manifest_line(self, line, manifest_path, line_number):
         if self.manifest_separator and self.manifest_separator in line:
-            parts = [part.strip() for part in line.split(self.manifest_separator)]
+            parts = [part.strip() for part in line.split(self.manifest_separator, maxsplit=2)]
         else:
-            parts = [part.strip() for part in line.split(",")]
+            parts = [part.strip() for part in line.split(",", maxsplit=2)]
 
         if len(parts) < 2:
             raise ValueError(f"Invalid manifest line {line_number} in {manifest_path}: {line}")
@@ -218,11 +221,13 @@ class TamperDataset(Dataset):
         mask_path = sample["mask_path"]
         class_label = sample["class_label"]
 
-        image = Image.open(image_path).convert("RGB")
+        with Image.open(image_path) as image_handle:
+            image = image_handle.convert("RGB")
         if class_label == 0 or mask_path is None:
             mask = Image.fromarray(np.zeros((image.height, image.width), dtype=np.uint8))
         else:
-            mask = Image.open(mask_path).convert("L")
+            with Image.open(mask_path) as mask_handle:
+                mask = mask_handle.convert("L")
 
         if self.transform is not None:
             image, mask = self.transform(image, mask)

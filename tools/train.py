@@ -2,6 +2,7 @@ import argparse
 import csv
 import os
 import sys
+import time
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -73,6 +74,17 @@ def cleanup_distributed():
 
 def is_main_process(rank):
     return rank == 0
+
+
+def format_duration(seconds):
+    seconds = max(0, int(seconds))
+    hours, remainder = divmod(seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    if hours > 0:
+        return f"{hours:d}h{minutes:02d}m"
+    if minutes > 0:
+        return f"{minutes:d}m{seconds:02d}s"
+    return f"{seconds:d}s"
 
 
 def seed_worker(worker_id):
@@ -219,8 +231,19 @@ def train_one_epoch(
     amp_enabled = config.get("training", {}).get("amp", True) and device.type == "cuda"
     log_interval = config.get("logging", {}).get("log_interval", 20)
     max_grad_norm = config.get("training", {}).get("max_grad_norm", 0.0)
+    total_epochs = config.get("scheduler", {}).get("epochs", epoch)
+    epoch_start_time = time.time()
 
-    progress = tqdm(loader, disable=not is_main_process(rank), desc=f"train epoch {epoch}")
+    progress = tqdm(
+        loader,
+        disable=not is_main_process(rank),
+        desc=f"train {epoch:03d}/{total_epochs:03d}",
+        dynamic_ncols=True,
+        leave=True,
+        mininterval=1.0,
+        position=0,
+        file=sys.stdout,
+    )
     for step, batch in enumerate(progress, start=1):
         inputs = batch["image"].to(device, non_blocking=True)
         targets = {"mask": batch["mask"].to(device, non_blocking=True)}
@@ -247,15 +270,38 @@ def train_one_epoch(
         loss_value = float(loss.detach().item())
         running_loss += loss_value
         num_batches += 1
+        avg_loss = running_loss / max(1, num_batches)
+
+        if is_main_process(rank):
+            elapsed = max(time.time() - epoch_start_time, 1e-6)
+            seconds_per_step = elapsed / step
+            steps_left_this_epoch = len(loader) - step
+            epochs_left_after_this = max(total_epochs - epoch, 0)
+            estimated_steps_left = steps_left_this_epoch + epochs_left_after_this * len(loader)
+            eta = format_duration(seconds_per_step * estimated_steps_left)
+            progress.set_postfix(
+                {
+                    "loss": f"{loss_value:.4f}",
+                    "avg": f"{avg_loss:.4f}",
+                    "lr": f"{optimizer.param_groups[0]['lr']:.2e}",
+                    "ep_left": total_epochs - epoch,
+                    "eta": eta,
+                },
+                refresh=False,
+            )
 
         if is_main_process(rank) and step % log_interval == 0:
-            progress.set_postfix(loss=f"{running_loss / max(1, num_batches):.4f}")
             logger.info(
-                "epoch=%d step=%d/%d train_loss=%.6f",
+                "phase=train epoch=%d/%d epoch_left=%d step=%d/%d loss=%.6f avg_loss=%.6f lr=%.8f eta=%s",
                 epoch,
+                total_epochs,
+                total_epochs - epoch,
                 step,
                 len(loader),
-                running_loss / max(1, num_batches),
+                loss_value,
+                avg_loss,
+                optimizer.param_groups[0]["lr"],
+                eta,
             )
 
     local_loss = running_loss / max(1, num_batches)
@@ -276,9 +322,20 @@ def validate(model, criterion, loader, device, epoch, config, output_dir, rank):
     max_vis = config.get("logging", {}).get("max_visualizations", 8)
     should_save_vis = save_vis and is_main_process(rank) and epoch % vis_interval == 0
     saved_vis = 0
+    total_epochs = config.get("scheduler", {}).get("epochs", epoch)
+    epoch_start_time = time.time()
 
-    progress = tqdm(loader, disable=not is_main_process(rank), desc=f"val epoch {epoch}")
-    for batch in progress:
+    progress = tqdm(
+        loader,
+        disable=not is_main_process(rank),
+        desc=f"val   {epoch:03d}/{total_epochs:03d}",
+        dynamic_ncols=True,
+        leave=True,
+        mininterval=1.0,
+        position=0,
+        file=sys.stdout,
+    )
+    for step, batch in enumerate(progress, start=1):
         inputs = batch["image"].to(device, non_blocking=True)
         masks = batch["mask"].to(device, non_blocking=True)
         targets = {"mask": masks}
@@ -286,11 +343,27 @@ def validate(model, criterion, loader, device, epoch, config, output_dir, rank):
         outputs = model(inputs)
         loss_dict = criterion(outputs, targets, return_dict=True)
         loss = loss_dict["loss"]
-        running_loss += float(loss.detach().item())
+        loss_value = float(loss.detach().item())
+        running_loss += loss_value
         num_batches += 1
+        avg_loss = running_loss / max(1, num_batches)
 
         probs = torch.sigmoid(outputs["mask_logits"])
         tracker.update(probs, masks)
+
+        if is_main_process(rank):
+            elapsed = max(time.time() - epoch_start_time, 1e-6)
+            seconds_per_step = elapsed / step
+            eta = format_duration(seconds_per_step * (len(loader) - step))
+            progress.set_postfix(
+                {
+                    "loss": f"{loss_value:.4f}",
+                    "avg": f"{avg_loss:.4f}",
+                    "ep_left": total_epochs - epoch,
+                    "eta": eta,
+                },
+                refresh=False,
+            )
 
         if should_save_vis and saved_vis < max_vis:
             saved_vis += save_validation_visuals(
@@ -434,9 +507,17 @@ def main():
         curve_dir.mkdir(parents=True, exist_ok=True)
         save_config(config, output_dir / "config.yaml")
 
+    log_files = []
+    if is_main_process(rank):
+        log_files.append(log_dir / "train.log")
+        server_log_file = config.get("logging", {}).get("server_log_file")
+        if server_log_file:
+            log_files.append(server_log_file)
+
     logger = setup_logger(
         "train",
-        log_file=log_dir / "train.log" if is_main_process(rank) else None,
+        log_files=log_files,
+        console=config.get("logging", {}).get("console", False) and is_main_process(rank),
     )
     if not is_main_process(rank):
         logger.disabled = True
@@ -499,6 +580,22 @@ def main():
                 logger=logger,
                 rank=rank,
             )
+
+            if scheduler is not None:
+                scheduler.step()
+
+            if is_main_process(rank):
+                save_training_checkpoint(
+                    checkpoint_dir / "train_epoch_latest.pth",
+                    model,
+                    optimizer,
+                    scheduler,
+                    scaler,
+                    epoch,
+                    best_metric,
+                    config,
+                )
+
             val_metrics = validate(
                 model=model,
                 criterion=criterion,
@@ -509,9 +606,6 @@ def main():
                 output_dir=output_dir,
                 rank=rank,
             )
-
-            if scheduler is not None:
-                scheduler.step()
 
             lr = optimizer.param_groups[0]["lr"]
             epoch_metrics = {"epoch": epoch, "lr": lr, **train_metrics, **val_metrics}

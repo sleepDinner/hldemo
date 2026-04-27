@@ -128,11 +128,18 @@ Training outputs are saved under `experiment.output_dir`:
 - `checkpoints/best.pth`
 - `checkpoints/last.pth`
 - `logs/train.log`
+- `/home/hl/train_hldemo.log`
 - `logs/tensorboard/`
 - `curves/metrics.csv`
 - `curves/*.png`
 - `visualizations/epoch_xxxx/*_prob.png`
 - `visualizations/epoch_xxxx/*_overlay.png`
+
+Server log can be viewed with:
+
+```bash
+tail -f /home/hl/train_hldemo.log
+```
 
 模型 forward、输出 shape 和 backward 的最小检查：
 

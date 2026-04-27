@@ -10,9 +10,14 @@ import torch
 from models.tamper_net import TamperNet
 
 
-def main():
-    torch.manual_seed(2026)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+def run_case(device, explicit_new_config=False):
+    kwargs = {}
+    if explicit_new_config:
+        kwargs = {
+            "frequency_branch_type": "hybrid",
+            "fusion_type": "cross_attention",
+            "use_hr_refine": True,
+        }
 
     model = TamperNet(
         in_channels=3,
@@ -22,6 +27,8 @@ def main():
         use_global_block=True,
         use_boundary_head=True,
         global_blocks=1,
+        hr_refine_channels=16,
+        **kwargs,
     ).to(device)
     model.train()
 
@@ -48,10 +55,21 @@ def main():
     loss.backward()
 
     num_params = sum(parameter.numel() for parameter in model.parameters())
-    print(f"device: {device}")
+    print(f"explicit_new_config: {explicit_new_config}")
+    print(f"frequency_branch_type: {model.frequency_branch_type}")
+    print(f"fusion_type: {model.fusion_type}")
+    print(f"use_hr_refine: {model.use_hr_refine}")
     print(f"parameters: {num_params:,}")
     for name, value in outputs.items():
         print(f"{name}: shape={tuple(value.shape)}, dtype={value.dtype}")
+
+
+def main():
+    torch.manual_seed(2026)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"device: {device}")
+    run_case(device, explicit_new_config=False)
+    run_case(device, explicit_new_config=True)
     print("quick model test passed")
 
 

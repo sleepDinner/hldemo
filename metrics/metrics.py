@@ -1,9 +1,57 @@
+import math
+
 import numpy as np
-from sklearn.metrics import roc_auc_score
+
+try:
+    from sklearn.metrics import roc_auc_score as _sklearn_roc_auc_score
+except ImportError:
+    _sklearn_roc_auc_score = None
 
 
 def _safe_divide(numerator, denominator):
     return float(numerator / denominator) if denominator != 0 else 0.0
+
+
+def _mcc_denominator(tp, fp, tn, fn):
+    terms = [
+        float(tp + fp),
+        float(tp + fn),
+        float(tn + fp),
+        float(tn + fn),
+    ]
+    if any(term <= 0.0 for term in terms):
+        return 0.0
+    return math.sqrt(terms[0] * terms[1] * terms[2] * terms[3])
+
+
+def _roc_auc_score(targets, scores):
+    if _sklearn_roc_auc_score is not None:
+        return float(_sklearn_roc_auc_score(targets, scores))
+
+    targets = np.asarray(targets).astype(np.uint8)
+    scores = np.asarray(scores, dtype=np.float64)
+    positives = targets == 1
+    negatives = targets == 0
+    num_pos = int(positives.sum())
+    num_neg = int(negatives.sum())
+    if num_pos == 0 or num_neg == 0:
+        raise ValueError("AUC requires both positive and negative samples.")
+
+    order = np.argsort(scores)
+    sorted_scores = scores[order]
+    ranks = np.empty(scores.shape[0], dtype=np.float64)
+    start = 0
+    while start < sorted_scores.shape[0]:
+        end = start + 1
+        while end < sorted_scores.shape[0] and sorted_scores[end] == sorted_scores[start]:
+            end += 1
+        average_rank = 0.5 * (start + 1 + end)
+        ranks[order[start:end]] = average_rank
+        start = end
+
+    rank_sum_pos = ranks[positives].sum()
+    auc = (rank_sum_pos - num_pos * (num_pos + 1) / 2.0) / (num_pos * num_neg)
+    return float(auc)
 
 
 def binary_metrics(pred_probs, targets, threshold=0.5):
@@ -102,12 +150,7 @@ class RunningBinaryMetrics:
         f1 = _safe_divide(2.0 * precision * recall, precision + recall)
         iou = _safe_divide(self.tp, self.tp + self.fp + self.fn)
         fpr = _safe_divide(self.fp, self.fp + self.tn)
-        mcc_den = np.sqrt(
-            (self.tp + self.fp)
-            * (self.tp + self.fn)
-            * (self.tn + self.fp)
-            * (self.tn + self.fn)
-        )
+        mcc_den = _mcc_denominator(self.tp, self.fp, self.tn, self.fn)
         mcc = _safe_divide(self.tp * self.tn - self.fp * self.fn, mcc_den)
         auc = self._compute_auc()
 
@@ -128,6 +171,6 @@ class RunningBinaryMetrics:
         scores = np.concatenate(self._auc_scores, axis=0)
         targets = np.concatenate(self._auc_targets, axis=0)
         try:
-            return float(roc_auc_score(targets, scores))
+            return _roc_auc_score(targets, scores)
         except ValueError:
             return 0.0

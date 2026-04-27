@@ -5,7 +5,7 @@ experiment:
 
 seed: 2026
 
-base_config: configs/train_casia.yaml
+base_config: configs/train_casia_manifest.yaml
 
 ablations:
   - name: rgb_only
@@ -13,21 +13,40 @@ ablations:
       model.use_frequency_branch: false
       model.use_global_block: false
       model.use_boundary_head: false
-  - name: rgb_plus_frequency
+      model.use_hr_refine: false
+  - name: hybrid_residual_only
     overrides:
       model.use_frequency_branch: true
+      model.frequency_branch_type: hybrid
+      model.fusion_type: cross_attention
       model.use_global_block: false
       model.use_boundary_head: false
-  - name: rgb_frequency_global
+      model.use_hr_refine: false
+  - name: hybrid_residual_global
     overrides:
       model.use_frequency_branch: true
+      model.frequency_branch_type: hybrid
+      model.fusion_type: cross_attention
       model.use_global_block: true
       model.use_boundary_head: false
-  - name: full_model
+      model.use_hr_refine: false
+  - name: hybrid_residual_global_boundary
     overrides:
       model.use_frequency_branch: true
+      model.frequency_branch_type: hybrid
+      model.fusion_type: cross_attention
       model.use_global_block: true
       model.use_boundary_head: true
+      model.use_hr_refine: false
+  - name: full_hybrid_cross_attention_hr_refine
+    overrides:
+      model.use_frequency_branch: true
+      model.frequency_branch_type: hybrid
+      model.fusion_type: cross_attention
+      model.use_global_block: true
+      model.use_boundary_head: true
+      model.use_hr_refine: true
+      model.hr_refine_channels: 32
 
 metrics:
   threshold: 0.5
@@ -39,4 +58,3 @@ metrics:
     - recall
     - mcc
     - fpr
-

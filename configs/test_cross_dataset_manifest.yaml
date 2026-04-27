@@ -1,4 +1,4 @@
-experiment:
+﻿experiment:
   name: cross_dataset_test_manifest
   task: image_manipulation_localization
   output_dir: outputs/cross_dataset_test_manifest
@@ -11,7 +11,7 @@ device:
   pin_memory: true
 
 checkpoint:
-  path: outputs/train_casia_d_manifest/checkpoints/best.pth
+  path: outputs/train_casia_d_manifest_hybrid_cross_attention_hr/checkpoints/best.pth
 
 data:
   input_size: [512, 512]
@@ -60,9 +60,13 @@ model:
   base_channels: 32
   decoder_channels: 64
   use_frequency_branch: true
+  frequency_branch_type: hybrid
+  fusion_type: cross_attention
   use_global_block: true
   use_boundary_head: true
   global_blocks: 2
+  use_hr_refine: true
+  hr_refine_channels: 32
 
 metrics:
   threshold: 0.5
@@ -74,3 +78,4 @@ robustness:
   jpeg_quality: [95, 75, 50, 30]
   resize_scale: [0.5, 0.75, 1.5]
   gaussian_blur_kernel: [3, 5]
+
