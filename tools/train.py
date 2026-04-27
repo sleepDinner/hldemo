@@ -1,5 +1,6 @@
 import argparse
 import csv
+import math
 import os
 import sys
 import time
@@ -12,7 +13,14 @@ if str(PROJECT_ROOT) not in sys.path:
 import matplotlib.pyplot as plt
 import torch
 import torch.distributed as dist
-from torch.cuda.amp import GradScaler, autocast
+try:
+    from torch.amp import GradScaler, autocast
+
+    _AMP_USES_DEVICE_TYPE = True
+except ImportError:
+    from torch.cuda.amp import GradScaler, autocast
+
+    _AMP_USES_DEVICE_TYPE = False
 from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
@@ -97,6 +105,24 @@ def seed_worker(worker_id):
     np.random.seed(worker_seed)
 
 
+def build_grad_scaler(enabled):
+    if _AMP_USES_DEVICE_TYPE:
+        try:
+            return GradScaler("cuda", enabled=enabled)
+        except TypeError:
+            return GradScaler(enabled=enabled)
+    return GradScaler(enabled=enabled)
+
+
+def autocast_context(enabled):
+    if _AMP_USES_DEVICE_TYPE:
+        try:
+            return autocast("cuda", enabled=enabled)
+        except TypeError:
+            return autocast(enabled=enabled)
+    return autocast(enabled=enabled)
+
+
 def build_dataloaders(config, distributed):
     train_transform = build_transforms(config, mode="train")
     val_transform = build_transforms(config, mode="test")
@@ -177,7 +203,7 @@ def build_scheduler(config, optimizer):
             return float(epoch + 1) / float(warmup_epochs)
         progress = (epoch - warmup_epochs) / max(1, epochs - warmup_epochs)
         if name == "cosine":
-            return 0.5 * (1.0 + torch.cos(torch.tensor(progress * torch.pi))).item()
+            return 0.5 * (1.0 + math.cos(progress * math.pi))
         if name == "linear":
             return max(0.0, 1.0 - progress)
         raise ValueError(f"Unsupported scheduler: {name}")
@@ -207,7 +233,7 @@ def reduce_metric_tracker(tracker):
 
     gathered = [None for _ in range(dist.get_world_size())]
     dist.all_gather_object(gathered, tracker.state_dict())
-    merged = RunningBinaryMetrics(threshold=tracker.threshold, max_auc_pixels=tracker.max_auc_pixels)
+    merged = RunningBinaryMetrics(threshold=tracker.threshold, max_auc_pixels=None)
     for state in gathered:
         merged.merge_state_dict(state)
     return merged
@@ -249,7 +275,7 @@ def train_one_epoch(
         targets = {"mask": batch["mask"].to(device, non_blocking=True)}
 
         optimizer.zero_grad(set_to_none=True)
-        with autocast(enabled=amp_enabled):
+        with autocast_context(enabled=amp_enabled):
             outputs = model(inputs)
             loss_dict = criterion(outputs, targets, return_dict=True)
             loss = loss_dict["loss"]
@@ -536,7 +562,7 @@ def main():
     optimizer = build_optimizer(config, model)
     scheduler = build_scheduler(config, optimizer)
     amp_enabled = config.get("training", {}).get("amp", True) and device.type == "cuda"
-    scaler = GradScaler(enabled=amp_enabled)
+    scaler = build_grad_scaler(enabled=amp_enabled)
 
     resume_path = args.resume or config.get("checkpoint", {}).get("resume")
     start_epoch, best_metric = load_resume_if_needed(

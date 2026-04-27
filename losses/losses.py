@@ -34,7 +34,9 @@ class TamperLocalizationLoss(nn.Module):
         mask_bce_weight=1.0,
         dice_weight=0.5,
         boundary_weight=0.3,
+        boundary_dice_weight=0.5,
         coarse_weight=0.2,
+        coarse_dice_weight=0.5,
         image_weight=0.1,
         boundary_kernel_size=5,
     ):
@@ -42,10 +44,24 @@ class TamperLocalizationLoss(nn.Module):
         self.mask_bce_weight = mask_bce_weight
         self.dice_weight = dice_weight
         self.boundary_weight = boundary_weight
+        self.boundary_dice_weight = boundary_dice_weight
         self.coarse_weight = coarse_weight
+        self.coarse_dice_weight = coarse_dice_weight
         self.image_weight = image_weight
         self.boundary_kernel_size = boundary_kernel_size
         self.dice = DiceLoss()
+
+    @staticmethod
+    def _build_image_targets(mask_targets):
+        """Build image-level labels from pixel masks.
+
+        Resized masks can contain soft values, so threshold the pixel mask first
+        and then mark an image as tampered if it contains any foreground pixel.
+        This is less sensitive to interpolation noise than `amax > 0`.
+        """
+
+        foreground_ratio = (mask_targets > 0.5).float().flatten(1).mean(dim=1, keepdim=True)
+        return (foreground_ratio > 1e-6).float()
 
     def forward(self, outputs, targets, return_dict=False):
         mask_targets = targets["mask"].float()
@@ -63,22 +79,30 @@ class TamperLocalizationLoss(nn.Module):
 
         coarse_logits = outputs.get("coarse_mask_logits")
         if coarse_logits is not None and self.coarse_weight > 0:
-            coarse_loss = F.binary_cross_entropy_with_logits(coarse_logits, mask_targets)
+            coarse_bce = F.binary_cross_entropy_with_logits(coarse_logits, mask_targets)
+            coarse_dice = self.dice(coarse_logits, mask_targets)
+            coarse_loss = coarse_bce + self.coarse_dice_weight * coarse_dice
             total = total + self.coarse_weight * coarse_loss
             losses["loss_coarse"] = coarse_loss.detach()
+            losses["loss_coarse_bce"] = coarse_bce.detach()
+            losses["loss_coarse_dice"] = coarse_dice.detach()
 
         boundary_logits = outputs.get("boundary_logits")
         if boundary_logits is not None and self.boundary_weight > 0:
             boundary_targets = targets.get("boundary")
             if boundary_targets is None:
                 boundary_targets = mask_to_boundary(mask_targets, kernel_size=self.boundary_kernel_size)
-            boundary_loss = F.binary_cross_entropy_with_logits(boundary_logits, boundary_targets)
+            boundary_bce = F.binary_cross_entropy_with_logits(boundary_logits, boundary_targets)
+            boundary_dice = self.dice(boundary_logits, boundary_targets)
+            boundary_loss = boundary_bce + self.boundary_dice_weight * boundary_dice
             total = total + self.boundary_weight * boundary_loss
             losses["loss_boundary"] = boundary_loss.detach()
+            losses["loss_boundary_bce"] = boundary_bce.detach()
+            losses["loss_boundary_dice"] = boundary_dice.detach()
 
         image_logits = outputs.get("image_logits")
         if image_logits is not None and self.image_weight > 0:
-            image_targets = (mask_targets.flatten(1).amax(dim=1, keepdim=True) > 0).float()
+            image_targets = self._build_image_targets(mask_targets)
             image_loss = F.binary_cross_entropy_with_logits(image_logits, image_targets)
             total = total + self.image_weight * image_loss
             losses["loss_image"] = image_loss.detach()
@@ -95,7 +119,9 @@ def build_loss(config):
         mask_bce_weight=loss_config.get("mask_bce_weight", 1.0),
         dice_weight=loss_config.get("dice_weight", 0.5),
         boundary_weight=loss_config.get("boundary_weight", 0.3),
+        boundary_dice_weight=loss_config.get("boundary_dice_weight", 0.5),
         coarse_weight=loss_config.get("coarse_weight", 0.2),
+        coarse_dice_weight=loss_config.get("coarse_dice_weight", 0.5),
         image_weight=loss_config.get("image_weight", 0.1),
         boundary_kernel_size=loss_config.get("boundary_kernel_size", 5),
     )

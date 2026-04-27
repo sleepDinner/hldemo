@@ -63,9 +63,10 @@ def binary_metrics(pred_probs, targets, threshold=0.5):
 class RunningBinaryMetrics:
     """Streaming pixel-level metrics for binary tamper masks."""
 
-    def __init__(self, threshold=0.5, max_auc_pixels=200000):
+    def __init__(self, threshold=0.5, max_auc_pixels=200000, auc_seed=2026):
         self.threshold = threshold
         self.max_auc_pixels = max_auc_pixels
+        self.auc_seed = auc_seed
         self.reset()
 
     def reset(self):
@@ -73,9 +74,16 @@ class RunningBinaryMetrics:
         self.fp = 0
         self.tn = 0
         self.fn = 0
-        self._auc_scores = []
-        self._auc_targets = []
+        self._rng = np.random.default_rng(self.auc_seed)
+        self._auc_seen = 0
         self._auc_count = 0
+        if self.max_auc_pixels is None:
+            self._auc_scores = []
+            self._auc_targets = []
+        else:
+            capacity = max(0, int(self.max_auc_pixels))
+            self._auc_scores = np.empty(capacity, dtype=np.float32)
+            self._auc_targets = np.empty(capacity, dtype=np.uint8)
 
     def update(self, pred_probs, targets):
         pred_probs = self._to_numpy(pred_probs).reshape(-1)
@@ -96,34 +104,80 @@ class RunningBinaryMetrics:
 
     def _store_auc_samples(self, pred_probs, targets):
         if self.max_auc_pixels == 0:
+            self._auc_seen += int(pred_probs.size)
             return
 
+        pred_probs = pred_probs.astype(np.float32, copy=False)
+        targets = targets.astype(np.uint8, copy=False)
+
         if self.max_auc_pixels is None:
-            keep = pred_probs.size
-        else:
-            remaining = self.max_auc_pixels - self._auc_count
-            if remaining <= 0:
-                return
-            keep = min(remaining, pred_probs.size)
+            self._auc_scores.append(pred_probs.copy())
+            self._auc_targets.append(targets.copy())
+            self._auc_count += int(pred_probs.size)
+            self._auc_seen += int(pred_probs.size)
+            return
 
-        if keep < pred_probs.size:
-            indices = np.linspace(0, pred_probs.size - 1, num=keep, dtype=np.int64)
-            pred_probs = pred_probs[indices]
-            targets = targets[indices]
+        capacity = int(self._auc_scores.shape[0])
+        num_pixels = int(pred_probs.size)
+        if capacity == 0 or num_pixels == 0:
+            self._auc_seen += num_pixels
+            return
 
-        self._auc_scores.append(pred_probs.astype(np.float32))
-        self._auc_targets.append(targets.astype(np.uint8))
-        self._auc_count += int(keep)
+        fill_count = min(capacity - self._auc_count, num_pixels)
+        if fill_count > 0:
+            start = self._auc_count
+            end = start + fill_count
+            self._auc_scores[start:end] = pred_probs[:fill_count]
+            self._auc_targets[start:end] = targets[:fill_count]
+            self._auc_count = end
+
+        remaining = num_pixels - fill_count
+        if remaining > 0:
+            start = fill_count
+            item_numbers = np.arange(
+                self._auc_seen + start + 1,
+                self._auc_seen + num_pixels + 1,
+                dtype=np.float64,
+            )
+            keep_prob = capacity / item_numbers
+            keep_mask = self._rng.random(remaining) < keep_prob
+            if np.any(keep_mask):
+                replacement_indices = self._rng.integers(
+                    0,
+                    capacity,
+                    size=int(keep_mask.sum()),
+                    dtype=np.int64,
+                )
+                self._auc_scores[replacement_indices] = pred_probs[start:][keep_mask]
+                self._auc_targets[replacement_indices] = targets[start:][keep_mask]
+
+        self._auc_seen += num_pixels
+
+    @staticmethod
+    def _flatten_samples(samples, dtype):
+        if isinstance(samples, list):
+            if not samples:
+                return np.empty(0, dtype=dtype)
+            return np.concatenate([np.asarray(item, dtype=dtype).reshape(-1) for item in samples], axis=0)
+        return np.asarray(samples, dtype=dtype).reshape(-1)
 
     def state_dict(self):
+        if self.max_auc_pixels is None:
+            auc_scores = [item.copy() for item in self._auc_scores]
+            auc_targets = [item.copy() for item in self._auc_targets]
+        else:
+            auc_scores = self._auc_scores[: self._auc_count].copy()
+            auc_targets = self._auc_targets[: self._auc_count].copy()
+
         return {
             "tp": self.tp,
             "fp": self.fp,
             "tn": self.tn,
             "fn": self.fn,
-            "auc_scores": self._auc_scores,
-            "auc_targets": self._auc_targets,
+            "auc_scores": auc_scores,
+            "auc_targets": auc_targets,
             "auc_count": self._auc_count,
+            "auc_seen": self._auc_seen,
         }
 
     def load_state_dict(self, state):
@@ -131,18 +185,40 @@ class RunningBinaryMetrics:
         self.fp = int(state["fp"])
         self.tn = int(state["tn"])
         self.fn = int(state["fn"])
-        self._auc_scores = list(state.get("auc_scores", []))
-        self._auc_targets = list(state.get("auc_targets", []))
-        self._auc_count = int(state.get("auc_count", 0))
+        scores = self._flatten_samples(state.get("auc_scores", []), np.float32)
+        targets = self._flatten_samples(state.get("auc_targets", []), np.uint8)
+        self._auc_seen = int(state.get("auc_seen", state.get("auc_count", scores.size)))
+
+        if self.max_auc_pixels is None:
+            self._auc_scores = [scores] if scores.size > 0 else []
+            self._auc_targets = [targets] if targets.size > 0 else []
+            self._auc_count = int(scores.size)
+            return
+
+        capacity = int(self._auc_scores.shape[0])
+        keep = min(capacity, int(scores.size))
+        self._auc_count = keep
+        if keep > 0:
+            self._auc_scores[:keep] = scores[:keep]
+            self._auc_targets[:keep] = targets[:keep]
 
     def merge_state_dict(self, state):
         self.tp += int(state["tp"])
         self.fp += int(state["fp"])
         self.tn += int(state["tn"])
         self.fn += int(state["fn"])
-        self._auc_scores.extend(state.get("auc_scores", []))
-        self._auc_targets.extend(state.get("auc_targets", []))
-        self._auc_count += int(state.get("auc_count", 0))
+        scores = self._flatten_samples(state.get("auc_scores", []), np.float32)
+        targets = self._flatten_samples(state.get("auc_targets", []), np.uint8)
+        if scores.size == 0:
+            return
+
+        if self.max_auc_pixels is None:
+            self._auc_scores.append(scores)
+            self._auc_targets.append(targets)
+            self._auc_count += int(scores.size)
+            self._auc_seen += int(state.get("auc_seen", scores.size))
+        else:
+            self._store_auc_samples(scores, targets)
 
     def compute(self):
         precision = _safe_divide(self.tp, self.tp + self.fp)
@@ -165,11 +241,15 @@ class RunningBinaryMetrics:
         }
 
     def _compute_auc(self):
-        if not self._auc_scores:
+        if self._auc_count == 0:
             return 0.0
 
-        scores = np.concatenate(self._auc_scores, axis=0)
-        targets = np.concatenate(self._auc_targets, axis=0)
+        if self.max_auc_pixels is None:
+            scores = np.concatenate(self._auc_scores, axis=0)
+            targets = np.concatenate(self._auc_targets, axis=0)
+        else:
+            scores = self._auc_scores[: self._auc_count]
+            targets = self._auc_targets[: self._auc_count]
         try:
             return _roc_auc_score(targets, scores)
         except ValueError:

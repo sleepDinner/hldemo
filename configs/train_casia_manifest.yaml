@@ -30,8 +30,8 @@ data:
     include_authentic: false
     skip_first: 0
   input_size: [512, 512]
-  batch_size: 4
-  val_batch_size: 1
+  batch_size: 8
+  val_batch_size: 4
   drop_last: false
   augmentation:
     train:
@@ -65,7 +65,9 @@ loss:
   mask_bce_weight: 1.0
   dice_weight: 0.5
   boundary_weight: 0.3
+  boundary_dice_weight: 0.5
   coarse_weight: 0.2
+  coarse_dice_weight: 0.5
   image_weight: 0.1
   boundary_kernel_size: 5
 
@@ -84,8 +86,8 @@ optimizer:
 
 scheduler:
   name: cosine
-  epochs: 100
-  warmup_epochs: 5
+  epochs: 30
+  warmup_epochs: 3
 
 checkpoint:
   resume: null
@@ -101,4 +103,3 @@ logging:
   save_visualizations: true
   visualization_interval: 1
   max_visualizations: 8
-
