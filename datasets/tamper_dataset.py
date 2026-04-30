@@ -57,6 +57,20 @@ class TamperDataset(Dataset):
         self.size_mismatch_records = []
         self.samples = self._build_samples()
 
+    def set_epoch(self, epoch):
+        if hasattr(self.transform, "set_epoch"):
+            self.transform.set_epoch(epoch)
+
+    def get_robust_strength_factor(self):
+        if hasattr(self.transform, "get_robust_strength_factor"):
+            return self.transform.get_robust_strength_factor()
+        return 0.0
+
+    def get_active_robust_ops(self):
+        if hasattr(self.transform, "get_active_robust_ops"):
+            return self.transform.get_active_robust_ops()
+        return []
+
     @staticmethod
     def _normalize_manifest_files(manifest_file, manifest_files):
         files = []

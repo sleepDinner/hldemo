@@ -174,6 +174,23 @@ def build_dataloaders(config, distributed):
     return train_loader, val_loader, train_sampler
 
 
+def set_dataset_epoch(loader, epoch):
+    if hasattr(loader.dataset, "set_epoch"):
+        loader.dataset.set_epoch(epoch)
+
+
+def get_dataset_robust_strength(loader):
+    if hasattr(loader.dataset, "get_robust_strength_factor"):
+        return loader.dataset.get_robust_strength_factor()
+    return 0.0
+
+
+def get_dataset_active_robust_ops(loader):
+    if hasattr(loader.dataset, "get_active_robust_ops"):
+        return loader.dataset.get_active_robust_ops()
+    return []
+
+
 def build_optimizer(config, model):
     optimizer_config = config.get("optimizer", {})
     name = optimizer_config.get("name", "adamw").lower()
@@ -617,6 +634,16 @@ def main():
         for epoch in range(start_epoch, epochs + 1):
             if train_sampler is not None:
                 train_sampler.set_epoch(epoch)
+            set_dataset_epoch(train_loader, epoch)
+            set_dataset_epoch(val_loader, epoch)
+
+            if is_main_process(rank):
+                logger.info(
+                    "epoch=%d robust_augmentation_strength=%.4f active_robust_ops=%s",
+                    epoch,
+                    get_dataset_robust_strength(train_loader),
+                    ",".join(get_dataset_active_robust_ops(train_loader)) or "none",
+                )
 
             train_metrics = train_one_epoch(
                 model=model,

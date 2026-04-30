@@ -16,6 +16,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from utils.config import load_config
 
 
+DEFAULT_CONFIG = PROJECT_ROOT / "configs" / "train_casia_manifest.yaml"
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
 NULL_MASK_VALUES = {"", "null", "none", "nan"}
 
@@ -24,7 +25,11 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description="Check how many all-zero masks and non-zero masks exist in a configured split."
     )
-    parser.add_argument("--config", required=True, help="Path to YAML config.")
+    parser.add_argument(
+        "--config",
+        default=str(DEFAULT_CONFIG),
+        help="Path to YAML config. Defaults to the current training config.",
+    )
     parser.add_argument("--split", default="train", help="Split name, usually train/val/test.")
     parser.add_argument("--dataset", default=None, help="Dataset name when checking data.test_sets.")
     parser.add_argument("--threshold", type=int, default=127, help="Mask foreground threshold in [0, 255].")
@@ -176,6 +181,36 @@ def build_samples(split_config):
     return build_directory_samples(split_config)
 
 
+def read_image_size(path):
+    with Image.open(path) as handle:
+        return handle.size
+
+
+def filter_size_mismatch_samples(samples):
+    filtered_samples = []
+    skipped = []
+    for sample in samples:
+        mask_path = sample["mask_path"]
+        if sample["class_label"] == 0 or mask_path is None:
+            filtered_samples.append(sample)
+            continue
+
+        image_size = read_image_size(sample["image_path"])
+        mask_size = read_image_size(mask_path)
+        if image_size == mask_size:
+            filtered_samples.append(sample)
+        else:
+            skipped.append(
+                {
+                    "image_path": sample["image_path"],
+                    "mask_path": mask_path,
+                    "image_size": image_size,
+                    "mask_size": mask_size,
+                }
+            )
+    return filtered_samples, skipped
+
+
 def get_split_config(config, split, dataset_name=None):
     data_config = config["data"]
     if split in data_config:
@@ -212,6 +247,9 @@ def main():
     config = load_config(args.config)
     split_config = get_split_config(config, args.split, args.dataset)
     samples = build_samples(split_config)
+    skipped_size_mismatch = []
+    if split_config.get("skip_size_mismatch", False):
+        samples, skipped_size_mismatch = filter_size_mismatch_samples(samples)
 
     zero_count = 0
     nonzero_count = 0
@@ -233,6 +271,17 @@ def main():
             if len(nonzero_examples) < args.show_examples:
                 nonzero_examples.append(sample)
 
+    print(f"检查配置: {args.config}")
+    print(f"检查 split: {args.split}")
+    print(f"检查数据集: {split_config.get('name', args.split)}")
+    if split_config.get("image_dir"):
+        print(f"image_dir: {resolve_path(split_config['image_dir'], root=split_config.get('root'))}")
+    if split_config.get("mask_dir"):
+        print(f"mask_dir: {resolve_path(split_config['mask_dir'], root=split_config.get('root'))}")
+    if normalize_manifest_files(split_config):
+        print(f"manifest_files: {', '.join(str(path) for path in normalize_manifest_files(split_config))}")
+    if skipped_size_mismatch:
+        print(f"已按训练配置跳过尺寸不一致样本: {len(skipped_size_mismatch)}")
     print(f"总 mask 数量: {len(samples)}")
     print(f"真实图负样本数量 mask全0: {zero_count}")
     print(f"篡改图正样本数量 mask非0: {nonzero_count}")

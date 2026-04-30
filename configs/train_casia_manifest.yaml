@@ -38,6 +38,39 @@ data:
       crop_size: [512, 512]
       hflip_prob: 0.5
       vflip_prob: 0.0
+      robust:
+        enabled: true
+        max_ops_per_image: 2
+        schedule:
+          enabled: true
+          start_factor: 0.2
+          end_factor: 1.0
+          warmup_epochs: 18
+        ops:
+          jpeg:
+            start_epoch: 1
+            prob: 0.35
+            quality: [70, 100]
+          resize:
+            start_epoch: 1
+            prob: 0.15
+            scale: [0.75, 1.25]
+          noise:
+            start_epoch: 8
+            prob: 0.10
+            std: [0.0, 0.015]
+          blur:
+            start_epoch: 8
+            prob: 0.10
+            radius: [0.3, 1.0]
+          gamma:
+            start_epoch: 15
+            prob: 0.08
+            gamma: [0.9, 1.1]
+          contrast:
+            start_epoch: 15
+            prob: 0.08
+            factor: [0.9, 1.1]
     test:
       random_crop: false
       hflip_prob: 0.0
@@ -86,7 +119,7 @@ optimizer:
 
 scheduler:
   name: cosine
-  epochs: 30
+  epochs: 40
   warmup_epochs: 3
 
 checkpoint:
