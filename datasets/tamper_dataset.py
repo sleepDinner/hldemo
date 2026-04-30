@@ -39,6 +39,7 @@ class TamperDataset(Dataset):
         recursive=False,
         mask_suffixes=None,
         strict_pairs=True,
+        skip_size_mismatch=False,
     ):
         self.root = Path(root) if root else None
         self.image_dir = self._resolve_path(image_dir) if image_dir else None
@@ -52,6 +53,8 @@ class TamperDataset(Dataset):
         self.recursive = recursive
         self.mask_suffixes = mask_suffixes or ["", "_mask", "_gt", "_label"]
         self.strict_pairs = strict_pairs
+        self.skip_size_mismatch = skip_size_mismatch
+        self.size_mismatch_records = []
         self.samples = self._build_samples()
 
     @staticmethod
@@ -68,8 +71,17 @@ class TamperDataset(Dataset):
 
     def _build_samples(self):
         if self.manifest_files:
-            return self._build_manifest_samples()
-        return self._build_directory_samples()
+            samples = self._build_manifest_samples()
+        else:
+            samples = self._build_directory_samples()
+
+        if self.skip_size_mismatch:
+            samples = self._filter_size_mismatch_samples(samples)
+
+        if not samples:
+            raise RuntimeError("No samples remain after dataset filtering.")
+
+        return samples
 
     def _resolve_path(self, path, manifest_path=None):
         path = Path(path)
@@ -174,6 +186,38 @@ class TamperDataset(Dataset):
 
         return samples
 
+    @staticmethod
+    def _read_image_size(path):
+        with Image.open(path) as handle:
+            return handle.size
+
+    def _filter_size_mismatch_samples(self, samples):
+        filtered_samples = []
+        self.size_mismatch_records = []
+
+        for sample in samples:
+            mask_path = sample["mask_path"]
+            if sample["class_label"] == 0 or mask_path is None:
+                filtered_samples.append(sample)
+                continue
+
+            image_size = self._read_image_size(sample["image_path"])
+            mask_size = self._read_image_size(mask_path)
+            if image_size == mask_size:
+                filtered_samples.append(sample)
+                continue
+
+            self.size_mismatch_records.append(
+                {
+                    "image_path": sample["image_path"],
+                    "mask_path": mask_path,
+                    "image_size": image_size,
+                    "mask_size": mask_size,
+                }
+            )
+
+        return filtered_samples
+
     def _parse_manifest_line(self, line, manifest_path, line_number):
         if self.manifest_separator and self.manifest_separator in line:
             parts = [part.strip() for part in line.split(self.manifest_separator, maxsplit=2)]
@@ -272,4 +316,5 @@ def build_dataset_from_split_config(split_config, transform=None, mode="test"):
         recursive=split_config.get("recursive", False),
         mask_suffixes=split_config.get("mask_suffixes"),
         strict_pairs=split_config.get("strict_pairs", True),
+        skip_size_mismatch=split_config.get("skip_size_mismatch", mode == "train"),
     )

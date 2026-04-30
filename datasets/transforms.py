@@ -26,6 +26,7 @@ class TamperPairTransform:
         vflip_prob=0.0,
         mean=None,
         std=None,
+        size_mismatch_policy="resize_mask",
     ):
         self.input_size = self._as_hw(input_size)
         self.mode = mode
@@ -35,6 +36,7 @@ class TamperPairTransform:
         self.vflip_prob = vflip_prob
         self.mean = torch.tensor(mean or [0.0, 0.0, 0.0], dtype=torch.float32).view(3, 1, 1)
         self.std = torch.tensor(std or [1.0, 1.0, 1.0], dtype=torch.float32).view(3, 1, 1)
+        self.size_mismatch_policy = size_mismatch_policy
 
     @staticmethod
     def _as_hw(size):
@@ -46,7 +48,14 @@ class TamperPairTransform:
 
     def __call__(self, image, mask):
         if image.size != mask.size:
-            raise ValueError(f"Image and mask size mismatch: image={image.size}, mask={mask.size}")
+            if self.size_mismatch_policy == "resize_mask":
+                mask = mask.resize(image.size, Image.NEAREST)
+            elif self.size_mismatch_policy == "resize_image":
+                image = image.resize(mask.size, Image.BILINEAR)
+            elif self.size_mismatch_policy == "error":
+                raise ValueError(f"Image and mask size mismatch: image={image.size}, mask={mask.size}")
+            else:
+                raise ValueError(f"Unsupported size_mismatch_policy: {self.size_mismatch_policy}")
 
         if self.mode == "train":
             image, mask = self._train_transform(image, mask)
@@ -136,4 +145,5 @@ def build_transforms(config, mode):
         vflip_prob=augment_config.get("vflip_prob", 0.0),
         mean=normalize.get("mean"),
         std=normalize.get("std"),
+        size_mismatch_policy=data_config.get("size_mismatch_policy", "resize_mask"),
     )

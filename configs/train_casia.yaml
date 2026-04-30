@@ -19,6 +19,7 @@ data:
     mask_dir: /data0/lzb-change-vmunet/FinalTrainData/masks
     recursive: false
     strict_pairs: true
+    skip_size_mismatch: true
     mask_suffixes: ["", "_mask", "_gt", "_label"]
   val:
     name: CASIA-D_val_manifest
@@ -27,6 +28,7 @@ data:
     include_authentic: false
     skip_first: 0
   input_size: [512, 512]
+  size_mismatch_policy: resize_mask
   batch_size: 4
   val_batch_size: 1
   drop_last: false

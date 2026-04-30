@@ -572,6 +572,11 @@ def main():
 
     train_loader, val_loader, train_sampler = build_dataloaders(config, distributed)
     logger.info("train samples=%d val samples=%d", len(train_loader.dataset), len(val_loader.dataset))
+    logger.info(
+        "train skipped_size_mismatch=%d val skipped_size_mismatch=%d",
+        len(getattr(train_loader.dataset, "size_mismatch_records", [])),
+        len(getattr(val_loader.dataset, "size_mismatch_records", [])),
+    )
 
     model = build_model(config).to(device)
     if distributed:

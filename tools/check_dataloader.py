@@ -63,6 +63,7 @@ def main():
 
     print(f"Dataset: {split_config.get('name', args.split)}")
     print(f"Samples: {len(dataset)}")
+    print(f"Skipped size mismatch samples: {len(getattr(dataset, 'size_mismatch_records', []))}")
     print(f"image shape: {tuple(batch['image'].shape)}, dtype: {batch['image'].dtype}")
     print(f"mask shape: {tuple(batch['mask'].shape)}, dtype: {batch['mask'].dtype}")
     print(f"mask min/max: {batch['mask'].min().item():.1f}/{batch['mask'].max().item():.1f}")
