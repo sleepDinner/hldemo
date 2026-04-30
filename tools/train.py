@@ -648,14 +648,30 @@ def add_selection_metric(epoch_metrics, config):
     epoch_metrics[f"{score_name}_eligible"] = 1.0
 
 
-def metric_is_better(current, best, mode):
+def metric_is_better(current, best, mode, min_delta=0.0):
+    current = float(current)
+    if not math.isfinite(current):
+        return False
     if best is None:
         return True
+    best = float(best)
+    min_delta = max(0.0, float(min_delta))
     if mode == "max":
-        return current > best
+        return current > best + min_delta
     if mode == "min":
-        return current < best
+        return current < best - min_delta
     raise ValueError(f"Unsupported checkpoint mode: {mode}")
+
+
+def should_stop_early(epoch, best_epoch, config):
+    early_config = config.get("early_stopping", {})
+    if not early_config.get("enabled", False):
+        return False
+    start_epoch_config = int(early_config.get("start_epoch", 1))
+    patience = int(early_config.get("patience", 8))
+    if epoch < start_epoch_config or best_epoch is None:
+        return False
+    return (epoch - best_epoch) >= patience
 
 
 def write_tensorboard(writer, metrics, epoch):
@@ -724,6 +740,7 @@ def main():
     epochs = config.get("scheduler", {}).get("epochs", 100)
     monitor = config.get("checkpoint", {}).get("monitor", "val_f1")
     mode = config.get("checkpoint", {}).get("mode", "max")
+    min_delta = config.get("checkpoint", {}).get("min_delta", 0.0)
 
     resume_path = args.resume or config.get("checkpoint", {}).get("resume")
     start_epoch, best_metric = load_resume_if_needed(
@@ -747,6 +764,7 @@ def main():
             logger.warning("tensorboard is not installed; scalar summaries are disabled")
 
     history = []
+    best_epoch = None
 
     try:
         for epoch in range(start_epoch, epochs + 1):
@@ -794,6 +812,7 @@ def main():
             epoch_metrics = {"epoch": epoch, "lr": lr, **train_metrics, **val_metrics}
             add_selection_metric(epoch_metrics, config)
             history.append(epoch_metrics)
+            stop_training = False
 
             if is_main_process(rank):
                 logger.info("epoch=%d metrics=%s", epoch, epoch_metrics)
@@ -814,9 +833,10 @@ def main():
                         float(config.get("checkpoint", {}).get("selection", {}).get("max_fpr", DEFAULT_SELECTION_MAX_FPR)),
                     )
 
-                is_best = metric_is_better(current_metric, best_metric, mode)
+                is_best = metric_is_better(current_metric, best_metric, mode, min_delta=min_delta)
                 if is_best:
                     best_metric = current_metric
+                    best_epoch = epoch
 
                 checkpoint_path = checkpoint_dir / f"checkpoint-epoch{epoch}.pth"
                 logger.info("saving epoch checkpoint: %s", checkpoint_path)
@@ -843,6 +863,24 @@ def main():
                         metrics=epoch_metrics,
                     )
                     logger.info("updated best checkpoint record: %s", best_record_path)
+
+                if should_stop_early(epoch, best_epoch, config):
+                    logger.info(
+                        "early stopping triggered at epoch=%d best_epoch=%d monitor=%s best_metric=%.8f",
+                        epoch,
+                        best_epoch,
+                        monitor,
+                        float(best_metric),
+                    )
+                    stop_training = True
+
+            if distributed:
+                stop_tensor = torch.tensor([1 if stop_training else 0], device=device)
+                dist.broadcast(stop_tensor, src=0)
+                stop_training = bool(stop_tensor.item())
+
+            if stop_training:
+                break
 
             if distributed and config.get("training", {}).get("sync_after_epoch", False):
                 dist.barrier()

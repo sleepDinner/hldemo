@@ -39,6 +39,9 @@ class TamperLocalizationLoss(nn.Module):
         coarse_dice_weight=0.5,
         image_weight=0.1,
         boundary_kernel_size=5,
+        bce_label_smoothing=0.0,
+        boundary_label_smoothing=None,
+        image_label_smoothing=None,
     ):
         super().__init__()
         self.mask_bce_weight = mask_bce_weight
@@ -49,7 +52,27 @@ class TamperLocalizationLoss(nn.Module):
         self.coarse_dice_weight = coarse_dice_weight
         self.image_weight = image_weight
         self.boundary_kernel_size = boundary_kernel_size
+        self.bce_label_smoothing = self._normalize_smoothing(bce_label_smoothing)
+        self.boundary_label_smoothing = self._normalize_smoothing(
+            bce_label_smoothing if boundary_label_smoothing is None else boundary_label_smoothing
+        )
+        self.image_label_smoothing = self._normalize_smoothing(
+            bce_label_smoothing if image_label_smoothing is None else image_label_smoothing
+        )
         self.dice = DiceLoss()
+
+    @staticmethod
+    def _normalize_smoothing(value):
+        value = float(value)
+        if value < 0.0 or value >= 0.5:
+            raise ValueError(f"label smoothing must be in [0, 0.5), got: {value}")
+        return value
+
+    @staticmethod
+    def _smooth_binary_targets(targets, smoothing):
+        if smoothing <= 0.0:
+            return targets
+        return targets * (1.0 - smoothing) + (1.0 - targets) * smoothing
 
     @staticmethod
     def _build_image_targets(mask_targets):
@@ -66,8 +89,9 @@ class TamperLocalizationLoss(nn.Module):
     def forward(self, outputs, targets, return_dict=False):
         mask_targets = targets["mask"].float()
         mask_logits = outputs["mask_logits"]
+        mask_bce_targets = self._smooth_binary_targets(mask_targets, self.bce_label_smoothing)
 
-        mask_bce = F.binary_cross_entropy_with_logits(mask_logits, mask_targets)
+        mask_bce = F.binary_cross_entropy_with_logits(mask_logits, mask_bce_targets)
         mask_dice = self.dice(mask_logits, mask_targets)
         total = self.mask_bce_weight * mask_bce + self.dice_weight * mask_dice
 
@@ -79,7 +103,7 @@ class TamperLocalizationLoss(nn.Module):
 
         coarse_logits = outputs.get("coarse_mask_logits")
         if coarse_logits is not None and self.coarse_weight > 0:
-            coarse_bce = F.binary_cross_entropy_with_logits(coarse_logits, mask_targets)
+            coarse_bce = F.binary_cross_entropy_with_logits(coarse_logits, mask_bce_targets)
             coarse_dice = self.dice(coarse_logits, mask_targets)
             coarse_loss = coarse_bce + self.coarse_dice_weight * coarse_dice
             total = total + self.coarse_weight * coarse_loss
@@ -92,7 +116,11 @@ class TamperLocalizationLoss(nn.Module):
             boundary_targets = targets.get("boundary")
             if boundary_targets is None:
                 boundary_targets = mask_to_boundary(mask_targets, kernel_size=self.boundary_kernel_size)
-            boundary_bce = F.binary_cross_entropy_with_logits(boundary_logits, boundary_targets)
+            boundary_bce_targets = self._smooth_binary_targets(
+                boundary_targets,
+                self.boundary_label_smoothing,
+            )
+            boundary_bce = F.binary_cross_entropy_with_logits(boundary_logits, boundary_bce_targets)
             boundary_dice = self.dice(boundary_logits, boundary_targets)
             boundary_loss = boundary_bce + self.boundary_dice_weight * boundary_dice
             total = total + self.boundary_weight * boundary_loss
@@ -103,7 +131,11 @@ class TamperLocalizationLoss(nn.Module):
         image_logits = outputs.get("image_logits")
         if image_logits is not None and self.image_weight > 0:
             image_targets = self._build_image_targets(mask_targets)
-            image_loss = F.binary_cross_entropy_with_logits(image_logits, image_targets)
+            image_bce_targets = self._smooth_binary_targets(
+                image_targets,
+                self.image_label_smoothing,
+            )
+            image_loss = F.binary_cross_entropy_with_logits(image_logits, image_bce_targets)
             total = total + self.image_weight * image_loss
             losses["loss_image"] = image_loss.detach()
 
@@ -124,4 +156,7 @@ def build_loss(config):
         coarse_dice_weight=loss_config.get("coarse_dice_weight", 0.5),
         image_weight=loss_config.get("image_weight", 0.1),
         boundary_kernel_size=loss_config.get("boundary_kernel_size", 5),
+        bce_label_smoothing=loss_config.get("bce_label_smoothing", 0.0),
+        boundary_label_smoothing=loss_config.get("boundary_label_smoothing"),
+        image_label_smoothing=loss_config.get("image_label_smoothing"),
     )

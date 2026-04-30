@@ -1,7 +1,7 @@
 ﻿experiment:
   name: rfb_traceformer_final_train_data
   task: image_manipulation_localization
-  output_dir: outputs/train_final_data_split90_val10_score
+  output_dir: outputs/train_final_data_split90_val10_score_reg
 
 seed: 2026
 
@@ -119,11 +119,19 @@ loss:
   coarse_dice_weight: 0.5
   image_weight: 0.1
   boundary_kernel_size: 5
+  bce_label_smoothing: 0.02
+  boundary_label_smoothing: 0.0
+  image_label_smoothing: 0.05
 
 training:
   amp: true
   max_grad_norm: 1.0
   sync_after_epoch: false
+
+early_stopping:
+  enabled: true
+  start_epoch: 18
+  patience: 8
 
 metrics:
   threshold: 0.5
@@ -133,18 +141,19 @@ metrics:
 
 optimizer:
   name: adamw
-  lr: 0.0001
-  weight_decay: 0.0001
+  lr: 0.00005
+  weight_decay: 0.0005
 
 scheduler:
   name: cosine
   epochs: 40
-  warmup_epochs: 3
+  warmup_epochs: 5
 
 checkpoint:
   resume: null
   monitor: val_score
   mode: max
+  min_delta: 0.002
   selection:
     name: val_score
     max_fpr: 0.05
