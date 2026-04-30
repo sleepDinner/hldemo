@@ -16,6 +16,10 @@ from utils.checkpoint import load_checkpoint
 from utils.config import load_config
 from utils.seed import set_seed
 from utils.visualization import save_mask, save_prediction_visualization
+from utils.warnings import suppress_pil_exif_warnings
+
+
+suppress_pil_exif_warnings()
 
 
 def parse_args():

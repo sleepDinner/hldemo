@@ -12,6 +12,10 @@ from datasets.tamper_dataset import build_dataset_from_split_config
 from datasets.transforms import build_transforms
 from utils.config import load_config
 from utils.seed import set_seed
+from utils.warnings import suppress_pil_exif_warnings
+
+
+suppress_pil_exif_warnings()
 
 
 def parse_args():

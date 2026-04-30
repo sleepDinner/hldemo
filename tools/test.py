@@ -21,6 +21,10 @@ from utils.config import load_config, save_config
 from utils.logger import setup_logger
 from utils.seed import set_seed
 from utils.visualization import save_mask, save_prediction_visualization
+from utils.warnings import suppress_pil_exif_warnings
+
+
+suppress_pil_exif_warnings()
 
 
 def parse_args():

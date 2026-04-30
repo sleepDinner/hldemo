@@ -15,6 +15,10 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from tools.check_mask_balance import build_samples, get_split_config
 from utils.config import load_config
+from utils.warnings import suppress_pil_exif_warnings
+
+
+suppress_pil_exif_warnings()
 
 
 def parse_args():

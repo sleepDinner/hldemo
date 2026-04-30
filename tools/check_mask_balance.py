@@ -14,6 +14,10 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from utils.config import load_config
+from utils.warnings import suppress_pil_exif_warnings
+
+
+suppress_pil_exif_warnings()
 
 
 DEFAULT_CONFIG = PROJECT_ROOT / "configs" / "train_casia_manifest.yaml"

@@ -5,6 +5,11 @@ import torch
 from PIL import Image
 from torch.utils.data import Dataset
 
+from utils.warnings import suppress_pil_exif_warnings
+
+
+suppress_pil_exif_warnings()
+
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
 
