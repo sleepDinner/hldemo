@@ -1,7 +1,7 @@
 ﻿experiment:
   name: rfb_traceformer_final_train_data
   task: image_manipulation_localization
-  output_dir: outputs/train_final_data_hybrid_cross_attention_hr
+  output_dir: outputs/train_final_data_split90_val10_score
 
 seed: 2026
 
@@ -13,20 +13,37 @@ device:
   pin_memory: true
 
 data:
-  train:
-    name: FinalTrainData
-    image_dir: /data0/lzb-change-vmunet/FinalTrainData/images
-    mask_dir: /data0/lzb-change-vmunet/FinalTrainData/masks
-    recursive: false
-    strict_pairs: true
+  split:
+    enabled: true
+    source:
+      name: FinalTrainData
+      image_dir: /data0/lzb-change-vmunet/FinalTrainData/images
+      mask_dir: /data0/lzb-change-vmunet/FinalTrainData/masks
+      recursive: false
+      strict_pairs: true
+      mask_suffixes: ["", "_mask", "_gt", "_label"]
+    train_manifest: data/splits/final_train_data_train.txt
+    val_manifest: data/splits/final_train_data_val.txt
+    val_ratio: 0.1
+    seed: 2026
+    threshold: 127
     skip_size_mismatch: true
-    mask_suffixes: ["", "_mask", "_gt", "_label"]
-  val:
-    name: CASIA-D_val_manifest
-    manifest_file: /data1/data/local/CASIA-D/CASIA-D_val_img_mask_cls.txt
+    overwrite: false
     manifest_separator: " # "
-    include_authentic: false
+  train:
+    name: FinalTrainData_train90_manifest
+    manifest_file: data/splits/final_train_data_train.txt
+    manifest_separator: " # "
+    include_authentic: true
     skip_first: 0
+    skip_size_mismatch: true
+  val:
+    name: FinalTrainData_val10_manifest
+    manifest_file: data/splits/final_train_data_val.txt
+    manifest_separator: " # "
+    include_authentic: true
+    skip_first: 0
+    skip_size_mismatch: true
   input_size: [512, 512]
   size_mismatch_policy: resize_mask
   batch_size: 4
@@ -111,6 +128,8 @@ training:
 metrics:
   threshold: 0.5
   max_auc_pixels: 200000
+  progress_size: 64
+  progress_max_auc_pixels: 50000
 
 optimizer:
   name: adamw
@@ -124,13 +143,23 @@ scheduler:
 
 checkpoint:
   resume: null
-  monitor: val_f1
+  monitor: val_score
   mode: max
+  selection:
+    name: val_score
+    max_fpr: 0.05
+    fpr_key: val_fpr
+    weights:
+      val_f1: 0.45
+      val_iou: 0.25
+      val_ap: 0.20
+      val_mcc: 0.10
 
 logging:
   console: false
   server_log_file: /home/hl/train_hldemo.log
   log_interval: 20
+  progress_metric_interval: 20
   save_visualizations: true
   visualization_interval: 1
   max_visualizations: 8

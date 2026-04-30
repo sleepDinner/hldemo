@@ -14,6 +14,7 @@ if str(PROJECT_ROOT) not in sys.path:
 import matplotlib.pyplot as plt
 import torch
 import torch.distributed as dist
+import torch.nn.functional as F
 try:
     from torch.amp import GradScaler, autocast
 
@@ -36,6 +37,7 @@ from utils.checkpoint import load_checkpoint, save_checkpoint
 from utils.config import load_config, save_config
 from utils.logger import setup_logger
 from utils.seed import set_seed
+from utils.stratified_split import ensure_stratified_split
 from utils.visualization import save_mask, save_prediction_visualization
 from utils.warnings import suppress_pil_exif_warnings
 
@@ -130,6 +132,15 @@ def autocast_context(enabled):
         except TypeError:
             return autocast(enabled=enabled)
     return autocast(enabled=enabled)
+
+
+def ensure_data_split_manifests(config, logger, rank, distributed):
+    if not config.get("data", {}).get("split", {}).get("enabled", False):
+        return
+    if is_main_process(rank):
+        ensure_stratified_split(config, logger=logger)
+    if distributed:
+        dist.barrier()
 
 
 def build_dataloaders(config, distributed):
@@ -265,6 +276,30 @@ def reduce_metric_tracker(tracker):
     return merged
 
 
+def update_progress_tracker(tracker, logits, masks, config):
+    progress_size = int(config.get("metrics", {}).get("progress_size", 64))
+    probs = torch.sigmoid(logits.detach()).float()
+    target_masks = masks.detach().float()
+    if progress_size > 0:
+        output_size = (progress_size, progress_size)
+        probs = F.interpolate(probs, size=output_size, mode="bilinear", align_corners=False)
+        target_masks = F.interpolate(target_masks, size=output_size, mode="nearest")
+    tracker.update(probs, target_masks)
+
+
+def progress_metric_postfix(metrics):
+    if not metrics:
+        return {}
+    return {
+        "F1": f"{metrics.get('f1', 0.0):.3f}",
+        "IoU": f"{metrics.get('iou', 0.0):.3f}",
+        "AUC": f"{metrics.get('auc', 0.0):.3f}",
+        "AP": f"{metrics.get('ap', 0.0):.3f}",
+        "MCC": f"{metrics.get('mcc', 0.0):.3f}",
+        "FPR": f"{metrics.get('fpr', 0.0):.3f}",
+    }
+
+
 def train_one_epoch(
     model,
     criterion,
@@ -285,6 +320,14 @@ def train_one_epoch(
     max_grad_norm = config.get("training", {}).get("max_grad_norm", 0.0)
     total_epochs = config.get("scheduler", {}).get("epochs", epoch)
     epoch_start_time = time.time()
+    threshold = config.get("metrics", {}).get("threshold", 0.5)
+    progress_max_auc_pixels = config.get("metrics", {}).get("progress_max_auc_pixels", 50000)
+    progress_metric_interval = max(1, int(config.get("logging", {}).get("progress_metric_interval", log_interval)))
+    progress_tracker = RunningBinaryMetrics(
+        threshold=threshold,
+        max_auc_pixels=progress_max_auc_pixels,
+    )
+    progress_metrics = {}
 
     progress = tqdm(
         loader,
@@ -298,7 +341,8 @@ def train_one_epoch(
     )
     for step, batch in enumerate(progress, start=1):
         inputs = batch["image"].to(device, non_blocking=True)
-        targets = {"mask": batch["mask"].to(device, non_blocking=True)}
+        masks = batch["mask"].to(device, non_blocking=True)
+        targets = {"mask": masks}
 
         optimizer.zero_grad(set_to_none=True)
         with autocast_context(enabled=amp_enabled):
@@ -325,34 +369,42 @@ def train_one_epoch(
         avg_loss = running_loss / max(1, num_batches)
 
         if is_main_process(rank):
+            if step == 1 or step % progress_metric_interval == 0 or step == len(loader):
+                update_progress_tracker(progress_tracker, outputs["mask_logits"], masks, config)
+                progress_metrics = progress_tracker.compute()
+
             elapsed = max(time.time() - epoch_start_time, 1e-6)
             seconds_per_step = elapsed / step
             steps_left_this_epoch = len(loader) - step
             epochs_left_after_this = max(total_epochs - epoch, 0)
             estimated_steps_left = steps_left_this_epoch + epochs_left_after_this * len(loader)
             eta = format_duration(seconds_per_step * estimated_steps_left)
-            progress.set_postfix(
-                {
-                    "loss": f"{loss_value:.4f}",
-                    "avg": f"{avg_loss:.4f}",
-                    "lr": f"{optimizer.param_groups[0]['lr']:.2e}",
-                    "ep_left": total_epochs - epoch,
-                    "eta": eta,
-                },
-                refresh=False,
-            )
+            postfix = {
+                "loss": f"{loss_value:.4f}",
+                "avg": f"{avg_loss:.4f}",
+                "lr": f"{optimizer.param_groups[0]['lr']:.2e}",
+                "eta": eta,
+            }
+            postfix.update(progress_metric_postfix(progress_metrics))
+            progress.set_postfix(postfix, refresh=False)
 
         if is_main_process(rank) and step % log_interval == 0:
             logger.info(
-                "phase=train epoch=%d/%d epoch_left=%d step=%d/%d loss=%.6f avg_loss=%.6f lr=%.8f eta=%s",
+                "phase=train epoch=%d/%d step=%d/%d loss=%.6f avg_loss=%.6f lr=%.8f "
+                "f1=%.6f iou=%.6f auc=%.6f ap=%.6f mcc=%.6f fpr=%.6f eta=%s",
                 epoch,
                 total_epochs,
-                total_epochs - epoch,
                 step,
                 len(loader),
                 loss_value,
                 avg_loss,
                 optimizer.param_groups[0]["lr"],
+                progress_metrics.get("f1", 0.0),
+                progress_metrics.get("iou", 0.0),
+                progress_metrics.get("auc", 0.0),
+                progress_metrics.get("ap", 0.0),
+                progress_metrics.get("mcc", 0.0),
+                progress_metrics.get("fpr", 0.0),
                 eta,
             )
 
@@ -376,6 +428,8 @@ def validate(model, criterion, loader, device, epoch, config, output_dir, rank):
     saved_vis = 0
     total_epochs = config.get("scheduler", {}).get("epochs", epoch)
     epoch_start_time = time.time()
+    progress_metric_interval = max(1, int(config.get("logging", {}).get("progress_metric_interval", 20)))
+    progress_metrics = {}
 
     progress = tqdm(
         loader,
@@ -404,18 +458,18 @@ def validate(model, criterion, loader, device, epoch, config, output_dir, rank):
         tracker.update(probs, masks)
 
         if is_main_process(rank):
+            if step == 1 or step % progress_metric_interval == 0 or step == len(loader):
+                progress_metrics = tracker.compute()
             elapsed = max(time.time() - epoch_start_time, 1e-6)
             seconds_per_step = elapsed / step
             eta = format_duration(seconds_per_step * (len(loader) - step))
-            progress.set_postfix(
-                {
-                    "loss": f"{loss_value:.4f}",
-                    "avg": f"{avg_loss:.4f}",
-                    "ep_left": total_epochs - epoch,
-                    "eta": eta,
-                },
-                refresh=False,
-            )
+            postfix = {
+                "loss": f"{loss_value:.4f}",
+                "avg": f"{avg_loss:.4f}",
+                "eta": eta,
+            }
+            postfix.update(progress_metric_postfix(progress_metrics))
+            progress.set_postfix(postfix, refresh=False)
 
         if should_save_vis and saved_vis < max_vis:
             saved_vis += save_validation_visuals(
@@ -480,7 +534,7 @@ def save_training_curves(history, output_dir):
         plt.close()
 
 
-def load_resume_if_needed(resume_path, model, optimizer, scheduler, scaler, device, logger):
+def load_resume_if_needed(resume_path, model, optimizer, scheduler, scaler, device, logger, monitor):
     if not resume_path:
         return 1, None
 
@@ -495,6 +549,16 @@ def load_resume_if_needed(resume_path, model, optimizer, scheduler, scaler, devi
 
     start_epoch = int(checkpoint["epoch"]) + 1
     best_metric = checkpoint.get("best_metric")
+    best_monitor = checkpoint.get("best_monitor")
+    if best_monitor is None and isinstance(checkpoint.get("config"), dict):
+        best_monitor = checkpoint["config"].get("checkpoint", {}).get("monitor")
+    if best_monitor is not None and best_monitor != monitor:
+        logger.warning(
+            "checkpoint best monitor is %s but current monitor is %s; resetting best metric",
+            best_monitor,
+            monitor,
+        )
+        best_metric = None
     logger.info("resumed from %s at epoch %d", resume_path, start_epoch)
     return start_epoch, best_metric
 
@@ -519,6 +583,7 @@ def save_training_checkpoint(
             "scheduler": scheduler.state_dict() if scheduler is not None else None,
             "scaler": scaler.state_dict() if scaler is not None else None,
             "best_metric": best_metric,
+            "best_monitor": config.get("checkpoint", {}).get("monitor"),
             "metrics": metrics or {},
             "config": config,
         },
@@ -526,7 +591,16 @@ def save_training_checkpoint(
     )
 
 
-def save_best_checkpoint_record(path, checkpoint_name, epoch, monitor, metric):
+DEFAULT_SELECTION_WEIGHTS = {
+    "val_f1": 0.45,
+    "val_iou": 0.25,
+    "val_ap": 0.20,
+    "val_mcc": 0.10,
+}
+DEFAULT_SELECTION_MAX_FPR = 0.05
+
+
+def save_best_checkpoint_record(path, checkpoint_name, epoch, monitor, metric, metrics=None):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     lines = [
@@ -534,7 +608,44 @@ def save_best_checkpoint_record(path, checkpoint_name, epoch, monitor, metric):
         f"epoch: {epoch}",
         f"{monitor}: {metric:.8f}",
     ]
+    if metrics:
+        for key in ["val_f1", "val_iou", "val_auc", "val_ap", "val_mcc", "val_fpr", "val_loss"]:
+            if key in metrics:
+                lines.append(f"{key}: {float(metrics[key]):.8f}")
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def add_selection_metric(epoch_metrics, config):
+    checkpoint_config = config.get("checkpoint", {})
+    selection_config = checkpoint_config.get("selection", {})
+    monitor = checkpoint_config.get("monitor", "val_f1")
+    if not selection_config and monitor != "val_score":
+        return
+
+    score_name = selection_config.get("name", "val_score")
+    weights = selection_config.get("weights", DEFAULT_SELECTION_WEIGHTS)
+    max_fpr = float(selection_config.get("max_fpr", DEFAULT_SELECTION_MAX_FPR))
+    fpr_key = selection_config.get("fpr_key", "val_fpr")
+    score = 0.0
+    missing = []
+
+    if fpr_key not in epoch_metrics:
+        missing.append(fpr_key)
+    elif float(epoch_metrics[fpr_key]) > max_fpr:
+        epoch_metrics[score_name] = float("-inf")
+        epoch_metrics[f"{score_name}_eligible"] = 0.0
+        return
+
+    for key, weight in weights.items():
+        if key not in epoch_metrics:
+            missing.append(key)
+            continue
+        score += float(weight) * float(epoch_metrics[key])
+
+    if missing:
+        raise KeyError(f"Selection metric requires missing metrics: {missing}")
+    epoch_metrics[score_name] = score
+    epoch_metrics[f"{score_name}_eligible"] = 1.0
 
 
 def metric_is_better(current, best, mode):
@@ -588,6 +699,8 @@ def main():
     if not is_main_process(rank):
         logger.disabled = True
 
+    ensure_data_split_manifests(config, logger, rank, distributed)
+
     device = torch.device(f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu")
     logger.info("using device=%s distributed=%s", device, distributed)
 
@@ -608,6 +721,9 @@ def main():
     scheduler = build_scheduler(config, optimizer)
     amp_enabled = config.get("training", {}).get("amp", True) and device.type == "cuda"
     scaler = build_grad_scaler(enabled=amp_enabled)
+    epochs = config.get("scheduler", {}).get("epochs", 100)
+    monitor = config.get("checkpoint", {}).get("monitor", "val_f1")
+    mode = config.get("checkpoint", {}).get("mode", "max")
 
     resume_path = args.resume or config.get("checkpoint", {}).get("resume")
     start_epoch, best_metric = load_resume_if_needed(
@@ -618,6 +734,7 @@ def main():
         scaler,
         device,
         logger,
+        monitor,
     )
 
     writer = None
@@ -629,9 +746,6 @@ def main():
         except ImportError:
             logger.warning("tensorboard is not installed; scalar summaries are disabled")
 
-    epochs = config.get("scheduler", {}).get("epochs", 100)
-    monitor = config.get("checkpoint", {}).get("monitor", "val_f1")
-    mode = config.get("checkpoint", {}).get("mode", "max")
     history = []
 
     try:
@@ -678,6 +792,7 @@ def main():
 
             lr = optimizer.param_groups[0]["lr"]
             epoch_metrics = {"epoch": epoch, "lr": lr, **train_metrics, **val_metrics}
+            add_selection_metric(epoch_metrics, config)
             history.append(epoch_metrics)
 
             if is_main_process(rank):
@@ -688,6 +803,16 @@ def main():
                 current_metric = epoch_metrics.get(monitor)
                 if current_metric is None:
                     raise KeyError(f"Monitor metric '{monitor}' not found in metrics: {epoch_metrics.keys()}")
+                if (
+                    monitor == config.get("checkpoint", {}).get("selection", {}).get("name", "val_score")
+                    and epoch_metrics.get(f"{monitor}_eligible") == 0.0
+                ):
+                    logger.info(
+                        "epoch=%d is not eligible for best checkpoint because val_fpr=%.6f exceeds max_fpr=%.6f",
+                        epoch,
+                        float(epoch_metrics.get("val_fpr", 0.0)),
+                        float(config.get("checkpoint", {}).get("selection", {}).get("max_fpr", DEFAULT_SELECTION_MAX_FPR)),
+                    )
 
                 is_best = metric_is_better(current_metric, best_metric, mode)
                 if is_best:
@@ -715,6 +840,7 @@ def main():
                         epoch,
                         monitor,
                         current_metric,
+                        metrics=epoch_metrics,
                     )
                     logger.info("updated best checkpoint record: %s", best_record_path)
 

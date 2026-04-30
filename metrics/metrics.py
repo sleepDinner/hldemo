@@ -3,8 +3,10 @@ import math
 import numpy as np
 
 try:
+    from sklearn.metrics import average_precision_score as _sklearn_average_precision_score
     from sklearn.metrics import roc_auc_score as _sklearn_roc_auc_score
 except ImportError:
+    _sklearn_average_precision_score = None
     _sklearn_roc_auc_score = None
 
 
@@ -52,6 +54,24 @@ def _roc_auc_score(targets, scores):
     rank_sum_pos = ranks[positives].sum()
     auc = (rank_sum_pos - num_pos * (num_pos + 1) / 2.0) / (num_pos * num_neg)
     return float(auc)
+
+
+def _average_precision_score(targets, scores):
+    targets = np.asarray(targets).astype(np.uint8)
+    scores = np.asarray(scores, dtype=np.float64)
+    positives = targets == 1
+    num_pos = int(positives.sum())
+    if num_pos == 0:
+        raise ValueError("AP requires at least one positive sample.")
+    if _sklearn_average_precision_score is not None:
+        return float(_sklearn_average_precision_score(targets, scores))
+
+    order = np.argsort(-scores)
+    sorted_targets = targets[order]
+    true_positives = np.cumsum(sorted_targets == 1)
+    ranks = np.arange(1, sorted_targets.shape[0] + 1, dtype=np.float64)
+    precision_at_k = true_positives / ranks
+    return float(precision_at_k[sorted_targets == 1].sum() / num_pos)
 
 
 def binary_metrics(pred_probs, targets, threshold=0.5):
@@ -229,11 +249,13 @@ class RunningBinaryMetrics:
         mcc_den = _mcc_denominator(self.tp, self.fp, self.tn, self.fn)
         mcc = _safe_divide(self.tp * self.tn - self.fp * self.fn, mcc_den)
         auc = self._compute_auc()
+        ap = self._compute_ap()
 
         return {
             "f1": f1,
             "iou": iou,
             "auc": auc,
+            "ap": ap,
             "precision": precision,
             "recall": recall,
             "mcc": mcc,
@@ -252,5 +274,20 @@ class RunningBinaryMetrics:
             targets = self._auc_targets[: self._auc_count]
         try:
             return _roc_auc_score(targets, scores)
+        except ValueError:
+            return 0.0
+
+    def _compute_ap(self):
+        if self._auc_count == 0:
+            return 0.0
+
+        if self.max_auc_pixels is None:
+            scores = np.concatenate(self._auc_scores, axis=0)
+            targets = np.concatenate(self._auc_targets, axis=0)
+        else:
+            scores = self._auc_scores[: self._auc_count]
+            targets = self._auc_targets[: self._auc_count]
+        try:
+            return _average_precision_score(targets, scores)
         except ValueError:
             return 0.0
