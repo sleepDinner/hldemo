@@ -11,7 +11,7 @@ device:
   pin_memory: true
 
 checkpoint:
-  path: outputs/train_casia_hybrid_cross_attention_hr/checkpoints/best.pth
+  path: outputs/train_final_data_hybrid_cross_attention_hr/checkpoints/best_checkpoint.txt
 
 data:
   input_size: [512, 512]

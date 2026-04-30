@@ -11,7 +11,7 @@ device:
   pin_memory: true
 
 checkpoint:
-  path: outputs/train_casia_d_manifest_hybrid_cross_attention_hr/checkpoints/best.pth
+  path: outputs/train_final_data_hybrid_cross_attention_hr/checkpoints/best_checkpoint.txt
 
 data:
   input_size: [512, 512]
@@ -25,6 +25,16 @@ data:
     mean: [0.485, 0.456, 0.406]
     std: [0.229, 0.224, 0.225]
   test_sets:
+    - name: CASIA-D_previous_train
+      manifest_files:
+        - /data1/data/local/CASIA-D/authentic_img_mask_cls.txt
+        - /data1/data/local/CASIA-D/splice_img_mask_cls.txt
+        - /data1/data/local/CASIA-D/splice_randmask_img_mask_cls.txt
+        - /data1/data/local/CASIA-D/copymove_img_mask_cls.txt
+        - /data1/data/local/CASIA-D/removal_img_mask_cls.txt
+      manifest_separator: " # "
+      include_authentic: true
+      skip_first: 200
     - name: COVERAGE
       manifest_file: /data1/data/local/COVERAGE/COVERAGE_revised_img_mask_cls.txt
       manifest_separator: " # "

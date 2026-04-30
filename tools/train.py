@@ -1,5 +1,6 @@
 import argparse
 import csv
+from datetime import timedelta
 import math
 import os
 import sys
@@ -45,7 +46,7 @@ def parse_args():
     return parser.parse_args()
 
 
-def setup_distributed():
+def setup_distributed(timeout_minutes=120):
     world_size = int(os.environ.get("WORLD_SIZE", "1"))
     distributed = world_size > 1
     if not distributed:
@@ -71,7 +72,11 @@ def setup_distributed():
             "for diagnostics."
         ) from exc
 
-    dist.init_process_group(backend="nccl", init_method="env://")
+    dist.init_process_group(
+        backend="nccl",
+        init_method="env://",
+        timeout=timedelta(minutes=timeout_minutes),
+    )
     return True, local_rank, rank, world_size
 
 
@@ -482,6 +487,7 @@ def save_training_checkpoint(
     epoch,
     best_metric,
     config,
+    metrics=None,
 ):
     model_to_save = model.module if hasattr(model, "module") else model
     save_checkpoint(
@@ -492,10 +498,22 @@ def save_training_checkpoint(
             "scheduler": scheduler.state_dict() if scheduler is not None else None,
             "scaler": scaler.state_dict() if scaler is not None else None,
             "best_metric": best_metric,
+            "metrics": metrics or {},
             "config": config,
         },
         path,
     )
+
+
+def save_best_checkpoint_record(path, checkpoint_name, epoch, monitor, metric):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = [
+        checkpoint_name,
+        f"epoch: {epoch}",
+        f"{monitor}: {metric:.8f}",
+    ]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def metric_is_better(current, best, mode):
@@ -519,7 +537,8 @@ def write_tensorboard(writer, metrics, epoch):
 def main():
     args = parse_args()
     config = load_config(args.config)
-    distributed, local_rank, rank, _ = setup_distributed()
+    timeout_minutes = config.get("device", {}).get("distributed_timeout_minutes", 120)
+    distributed, local_rank, rank, _ = setup_distributed(timeout_minutes=timeout_minutes)
     set_seed(config.get("seed", 2026) + rank)
 
     output_dir = Path(config["experiment"]["output_dir"])
@@ -610,18 +629,6 @@ def main():
             if scheduler is not None:
                 scheduler.step()
 
-            if is_main_process(rank):
-                save_training_checkpoint(
-                    checkpoint_dir / "train_epoch_latest.pth",
-                    model,
-                    optimizer,
-                    scheduler,
-                    scaler,
-                    epoch,
-                    best_metric,
-                    config,
-                )
-
             val_metrics = validate(
                 model=model,
                 criterion=criterion,
@@ -649,20 +656,11 @@ def main():
                 is_best = metric_is_better(current_metric, best_metric, mode)
                 if is_best:
                     best_metric = current_metric
-                    save_training_checkpoint(
-                        checkpoint_dir / "best.pth",
-                        model,
-                        optimizer,
-                        scheduler,
-                        scaler,
-                        epoch,
-                        best_metric,
-                        config,
-                    )
-                    logger.info("saved best checkpoint at epoch=%d %s=%.6f", epoch, monitor, best_metric)
 
+                checkpoint_path = checkpoint_dir / f"checkpoint-epoch{epoch}.pth"
+                logger.info("saving epoch checkpoint: %s", checkpoint_path)
                 save_training_checkpoint(
-                    checkpoint_dir / "last.pth",
+                    checkpoint_path,
                     model,
                     optimizer,
                     scheduler,
@@ -670,9 +668,21 @@ def main():
                     epoch,
                     best_metric,
                     config,
+                    metrics=epoch_metrics,
                 )
+                logger.info("saved epoch checkpoint: %s", checkpoint_path)
+                if is_best:
+                    best_record_path = checkpoint_dir / "best_checkpoint.txt"
+                    save_best_checkpoint_record(
+                        best_record_path,
+                        checkpoint_path.name,
+                        epoch,
+                        monitor,
+                        current_metric,
+                    )
+                    logger.info("updated best checkpoint record: %s", best_record_path)
 
-            if distributed:
+            if distributed and config.get("training", {}).get("sync_after_epoch", False):
                 dist.barrier()
     finally:
         if writer is not None:

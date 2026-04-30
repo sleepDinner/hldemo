@@ -1,31 +1,31 @@
 ﻿experiment:
-  name: rfb_traceformer_casia
+  name: rfb_traceformer_final_train_data
   task: image_manipulation_localization
-  output_dir: outputs/train_casia_hybrid_cross_attention_hr
+  output_dir: outputs/train_final_data_hybrid_cross_attention_hr
 
 seed: 2026
 
 device:
   accelerator: cuda
   distributed: false
+  distributed_timeout_minutes: 120
   num_workers: 4
   pin_memory: true
 
 data:
   train:
-    name: CASIA_train
-    image_dir: data/CASIA/train/images
-    mask_dir: data/CASIA/train/masks
+    name: FinalTrainData
+    image_dir: /data0/lzb-change-vmunet/FinalTrainData/images
+    mask_dir: /data0/lzb-change-vmunet/FinalTrainData/masks
     recursive: false
     strict_pairs: true
     mask_suffixes: ["", "_mask", "_gt", "_label"]
   val:
-    name: CASIA_val
-    image_dir: data/CASIA/val/images
-    mask_dir: data/CASIA/val/masks
-    recursive: false
-    strict_pairs: true
-    mask_suffixes: ["", "_mask", "_gt", "_label"]
+    name: CASIA-D_val_manifest
+    manifest_file: /data1/data/local/CASIA-D/CASIA-D_val_img_mask_cls.txt
+    manifest_separator: " # "
+    include_authentic: false
+    skip_first: 0
   input_size: [512, 512]
   batch_size: 4
   val_batch_size: 1
@@ -71,6 +71,7 @@ loss:
 training:
   amp: true
   max_grad_norm: 1.0
+  sync_after_epoch: false
 
 metrics:
   threshold: 0.5
@@ -88,8 +89,6 @@ scheduler:
 
 checkpoint:
   resume: null
-  save_best: true
-  save_last: true
   monitor: val_f1
   mode: max
 
