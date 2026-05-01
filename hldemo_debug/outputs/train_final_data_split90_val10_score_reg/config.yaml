@@ -1,0 +1,207 @@
+experiment:
+  name: rfb_traceformer_final_train_data
+  task: image_manipulation_localization
+  output_dir: outputs/train_final_data_split90_val10_score_reg
+seed: 2026
+device:
+  accelerator: cuda
+  distributed: false
+  distributed_timeout_minutes: 120
+  num_workers: 4
+  pin_memory: true
+data:
+  split:
+    enabled: true
+    source:
+      name: FinalTrainData
+      image_dir: /data0/lzb-change-vmunet/FinalTrainData/images
+      mask_dir: /data0/lzb-change-vmunet/FinalTrainData/masks
+      recursive: false
+      strict_pairs: true
+      mask_suffixes:
+      - ''
+      - _mask
+      - _gt
+      - _label
+    train_manifest: data/splits/final_train_data_train.txt
+    val_manifest: data/splits/final_train_data_val.txt
+    val_ratio: 0.1
+    seed: 2026
+    threshold: 127
+    skip_size_mismatch: true
+    overwrite: false
+    manifest_separator: ' # '
+  train:
+    name: FinalTrainData_train90_manifest
+    manifest_file: data/splits/final_train_data_train.txt
+    manifest_separator: ' # '
+    include_authentic: true
+    skip_first: 0
+    skip_size_mismatch: true
+  val:
+    name: FinalTrainData_val10_manifest
+    manifest_file: data/splits/final_train_data_val.txt
+    manifest_separator: ' # '
+    include_authentic: true
+    skip_first: 0
+    skip_size_mismatch: true
+  input_size:
+  - 512
+  - 512
+  size_mismatch_policy: resize_mask
+  batch_size: 8
+  val_batch_size: 4
+  drop_last: false
+  augmentation:
+    train:
+      random_crop: true
+      crop_size:
+      - 512
+      - 512
+      foreground_crop_prob: 0.6
+      foreground_crop_min_ratio: 0.0005
+      foreground_crop_max_retries: 10
+      foreground_crop_threshold: 127
+      hflip_prob: 0.5
+      vflip_prob: 0.0
+      robust:
+        enabled: true
+        max_ops_per_image: 2
+        schedule:
+          enabled: true
+          start_factor: 0.2
+          end_factor: 1.0
+          warmup_epochs: 18
+        ops:
+          jpeg:
+            start_epoch: 1
+            prob: 0.35
+            quality:
+            - 70
+            - 100
+          resize:
+            start_epoch: 1
+            prob: 0.15
+            scale:
+            - 0.75
+            - 1.25
+          noise:
+            start_epoch: 8
+            prob: 0.1
+            std:
+            - 0.0
+            - 0.015
+          blur:
+            start_epoch: 8
+            prob: 0.1
+            radius:
+            - 0.3
+            - 1.0
+          gamma:
+            start_epoch: 15
+            prob: 0.08
+            gamma:
+            - 0.9
+            - 1.1
+          contrast:
+            start_epoch: 15
+            prob: 0.08
+            factor:
+            - 0.9
+            - 1.1
+    test:
+      random_crop: false
+      hflip_prob: 0.0
+      vflip_prob: 0.0
+  normalize:
+    mean:
+    - 0.485
+    - 0.456
+    - 0.406
+    std:
+    - 0.229
+    - 0.224
+    - 0.225
+model:
+  name: tamper_net
+  in_channels: 3
+  base_channels: 32
+  decoder_channels: 64
+  use_frequency_branch: true
+  frequency_branch_type: hybrid
+  fusion_type: cross_attention
+  use_global_block: true
+  use_boundary_head: true
+  global_blocks: 2
+  use_hr_refine: true
+  hr_refine_channels: 32
+loss:
+  mask_bce_weight: 1.0
+  mask_bce_mode: focal
+  mask_focal_alpha: 0.75
+  mask_focal_gamma: 2.0
+  mask_pos_weight: null
+  mask_pos_weight_auto: false
+  mask_pos_weight_max: 20.0
+  dice_weight: 0.5
+  boundary_weight: 0.3
+  boundary_dice_weight: 0.5
+  coarse_weight: 0.2
+  coarse_dice_weight: 0.5
+  image_weight: 0.1
+  boundary_kernel_size: 5
+  bce_label_smoothing: 0.0
+  boundary_label_smoothing: 0.0
+  image_label_smoothing: 0.05
+training:
+  amp: true
+  max_grad_norm: 1.0
+  sync_after_epoch: false
+early_stopping:
+  enabled: true
+  start_epoch: 18
+  patience: 6
+metrics:
+  threshold: 0.5
+  max_auc_pixels: 1000000
+  progress_size: 64
+  progress_max_auc_pixels: 50000
+  threshold_search:
+    enabled: true
+    start: 0.05
+    end: 0.95
+    step: 0.05
+    optimize: f1
+    max_fpr: 0.05
+optimizer:
+  name: adamw
+  lr: 5.0e-05
+  weight_decay: 0.0005
+scheduler:
+  name: cosine
+  epochs: 40
+  warmup_epochs: 5
+checkpoint:
+  resume: null
+  monitor: val_score
+  mode: max
+  min_delta: 0.001
+  selection:
+    name: val_score
+    max_fpr: 0.05
+    fpr_key: val_best_fpr
+    weights:
+      val_best_f1: 0.45
+      val_best_iou: 0.25
+      val_ap: 0.2
+      val_best_mcc: 0.1
+logging:
+  console: false
+  server_log_file: /home/hl/train_hldemo.log
+  log_interval: 20
+  progress_metric_interval: 20
+  save_visualizations: true
+  visualization_interval: 1
+  max_visualizations: 8
+  save_validation_diagnostics: true
+  validation_diagnostics_interval: 1

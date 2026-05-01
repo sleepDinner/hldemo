@@ -40,6 +40,7 @@ from models import build_model
 from utils.checkpoint import load_checkpoint, save_checkpoint
 from utils.config import load_config, save_config
 from utils.logger import setup_logger
+from utils.samplers import build_balanced_train_sampler
 from utils.seed import set_seed
 from utils.stratified_split import ensure_stratified_split
 from utils.visualization import save_mask, save_prediction_visualization
@@ -159,24 +160,40 @@ def ensure_data_split_manifests(config, logger, rank, distributed):
         distributed_barrier()
 
 
+def split_config_with_source_groups(config, split):
+    split_config = dict(config["data"][split])
+    source_group_config = config["data"].get("source_group", {})
+    for key in ["source_group_mode", "source_group_patterns"]:
+        if key not in split_config and key in source_group_config:
+            split_config[key] = source_group_config[key]
+    return split_config
+
+
 def build_dataloaders(config, distributed):
     train_transform = build_transforms(config, mode="train")
     val_transform = build_transforms(config, mode="test")
     train_dataset = build_dataset_from_split_config(
-        config["data"]["train"],
+        split_config_with_source_groups(config, "train"),
         transform=train_transform,
         mode="train",
     )
     val_dataset = build_dataset_from_split_config(
-        config["data"]["val"],
+        split_config_with_source_groups(config, "val"),
         transform=val_transform,
         mode="test",
     )
 
-    train_sampler = DistributedSampler(train_dataset, shuffle=True) if distributed else None
+    seed = config.get("seed", 2026)
+    train_sampler = build_balanced_train_sampler(
+        train_dataset,
+        config.get("data", {}).get("sampling", {}).get("train", {}),
+        distributed=distributed,
+        seed=seed,
+    )
+    if train_sampler is None and distributed:
+        train_sampler = DistributedSampler(train_dataset, shuffle=True)
     val_sampler = DistributedSampler(val_dataset, shuffle=False) if distributed else None
 
-    seed = config.get("seed", 2026)
     generator = torch.Generator()
     generator.manual_seed(seed)
 
@@ -203,6 +220,21 @@ def build_dataloaders(config, distributed):
         generator=generator,
     )
     return train_loader, val_loader, train_sampler
+
+
+def _set_batchnorm_eval(module):
+    if isinstance(module, torch.nn.modules.batchnorm._BatchNorm):
+        module.eval()
+
+
+def freeze_batchnorm_if_needed(model, epoch, config):
+    freeze_after_epoch = config.get("training", {}).get("freeze_batchnorm_after_epoch")
+    if freeze_after_epoch is None:
+        return False
+    if int(freeze_after_epoch) <= 0 or epoch < int(freeze_after_epoch):
+        return False
+    model.apply(_set_batchnorm_eval)
+    return True
 
 
 def set_dataset_epoch(loader, epoch):
@@ -341,6 +373,7 @@ def build_validation_diagnostic_rows(batch, probs, masks, threshold, epoch, step
     image_paths = batch_field_to_list(batch, "image_path", batch_size)
     mask_paths = batch_field_to_list(batch, "mask_path", batch_size)
     class_labels = batch_field_to_list(batch, "class_label", batch_size, default=-1)
+    source_groups = batch_field_to_list(batch, "source_group", batch_size, default="default")
 
     rows = []
     fixed_thresholds = (0.05, 0.10, 0.30, 0.50)
@@ -369,6 +402,7 @@ def build_validation_diagnostic_rows(batch, probs, masks, threshold, epoch, step
             "image_path": image_paths[index],
             "mask_path": mask_paths[index],
             "class_label": int(class_labels[index]),
+            "source_group": source_groups[index],
             "pixels": pixels,
             "target_pixels": target_pixels,
             "target_fg_ratio": target_pixels / max(1, pixels),
@@ -420,6 +454,7 @@ def save_validation_diagnostic_rows(rows, output_dir, epoch):
         "image_path",
         "mask_path",
         "class_label",
+        "source_group",
         "pixels",
         "target_pixels",
         "target_fg_ratio",
@@ -521,6 +556,7 @@ def train_one_epoch(
     rank,
 ):
     model.train()
+    freeze_batchnorm_if_needed(model, epoch, config)
     running_loss = 0.0
     loss_component_sums = {}
     prediction_stat_sums = {}
@@ -991,6 +1027,8 @@ def main():
 
     train_loader, val_loader, train_sampler = build_dataloaders(config, distributed)
     logger.info("train samples=%d val samples=%d", len(train_loader.dataset), len(val_loader.dataset))
+    if hasattr(train_sampler, "summary"):
+        logger.info("train sampler=%s", train_sampler.summary())
     logger.info(
         "train skipped_size_mismatch=%d val skipped_size_mismatch=%d",
         len(getattr(train_loader.dataset, "size_mismatch_records", [])),

@@ -8,9 +8,10 @@ from .backbone import ConvBNAct, ResidualTextureBlock
 class BoundaryRefinementDecoder(nn.Module):
     """FPN-style decoder with a boundary branch for sharper masks."""
 
-    def __init__(self, in_channels, decoder_channels=64, use_boundary_head=True):
+    def __init__(self, in_channels, decoder_channels=64, use_boundary_head=True, dropout=0.0):
         super().__init__()
         self.use_boundary_head = use_boundary_head
+        self.dropout = nn.Dropout2d(float(dropout)) if float(dropout) > 0 else nn.Identity()
         self.lateral_convs = nn.ModuleList(
             [nn.Conv2d(channels, decoder_channels, kernel_size=1, bias=False) for channels in in_channels]
         )
@@ -66,6 +67,7 @@ class BoundaryRefinementDecoder(nn.Module):
         # multi_scale tensors: all [B, decoder_C, H/2, W/2]
 
         decoded = self.aggregate(torch.cat(multi_scale, dim=1))
+        decoded = self.dropout(decoded)
         # decoded: [B, decoder_C, H/2, W/2]
 
         coarse_mask_logits = self.coarse_head(decoded)

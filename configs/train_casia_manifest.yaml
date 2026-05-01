@@ -1,7 +1,7 @@
 ﻿experiment:
-  name: rfb_traceformer_final_train_data
+  name: rfb_traceformer_final_train_data_source_balanced_v2
   task: image_manipulation_localization
-  output_dir: outputs/train_final_data_split90_val10_score_reg
+  output_dir: outputs/train_final_data_split90_val10_score_reg_v2
 
 seed: 2026
 
@@ -13,6 +13,23 @@ device:
   pin_memory: true
 
 data:
+  source_group:
+    source_group_mode: stem_prefix
+    source_group_patterns:
+      - prefix: Fan_Fake
+        group: Fan_Fake
+      - prefix: Fan_Real
+        group: Fan_Real
+      - prefix: Au_
+        group: Au
+      - prefix: Tp_
+        group: Tp
+  sampling:
+    train:
+      enabled: true
+      group_by: source_label
+      replacement: true
+      samples_per_epoch: null
   split:
     enabled: true
     source:
@@ -65,8 +82,8 @@ data:
         schedule:
           enabled: true
           start_factor: 0.2
-          end_factor: 1.0
-          warmup_epochs: 18
+          end_factor: 0.7
+          warmup_epochs: 24
         ops:
           jpeg:
             start_epoch: 1
@@ -113,35 +130,40 @@ model:
   global_blocks: 2
   use_hr_refine: true
   hr_refine_channels: 32
+  decoder_dropout: 0.05
+  feature_dropout: 0.05
+  use_image_head: false
 
 loss:
   mask_bce_weight: 1.0
   mask_bce_mode: focal
-  mask_focal_alpha: 0.75
-  mask_focal_gamma: 2.0
+  mask_focal_alpha: 0.55
+  mask_focal_gamma: 1.5
   mask_pos_weight: null
   mask_pos_weight_auto: false
   mask_pos_weight_max: 20.0
   dice_weight: 0.5
-  boundary_weight: 0.3
+  boundary_weight: 0.2
   boundary_dice_weight: 0.5
-  coarse_weight: 0.2
+  coarse_weight: 0.05
   coarse_dice_weight: 0.5
-  image_weight: 0.1
+  image_weight: 0.0
   boundary_kernel_size: 5
-  bce_label_smoothing: 0.0
+  bce_label_smoothing: 0.01
   boundary_label_smoothing: 0.0
   image_label_smoothing: 0.05
+  logit_l2_weight: 0.0001
 
 training:
   amp: true
   max_grad_norm: 1.0
   sync_after_epoch: false
+  freeze_batchnorm_after_epoch: 8
 
 early_stopping:
   enabled: true
-  start_epoch: 18
-  patience: 6
+  start_epoch: 12
+  patience: 8
 
 metrics:
   threshold: 0.5
@@ -158,8 +180,8 @@ metrics:
 
 optimizer:
   name: adamw
-  lr: 0.00005
-  weight_decay: 0.0005
+  lr: 0.00003
+  weight_decay: 0.001
 
 scheduler:
   name: cosine
@@ -183,7 +205,7 @@ checkpoint:
 
 logging:
   console: false
-  server_log_file: /home/hl/train_hldemo.log
+  server_log_file: /home/hl/train_hldemo_v2.log
   log_interval: 20
   progress_metric_interval: 20
   save_visualizations: true

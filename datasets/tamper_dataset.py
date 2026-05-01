@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 import numpy as np
@@ -45,6 +46,8 @@ class TamperDataset(Dataset):
         mask_suffixes=None,
         strict_pairs=True,
         skip_size_mismatch=False,
+        source_group_mode="stem_prefix",
+        source_group_patterns=None,
     ):
         self.root = Path(root) if root else None
         self.image_dir = self._resolve_path(image_dir) if image_dir else None
@@ -59,6 +62,8 @@ class TamperDataset(Dataset):
         self.mask_suffixes = mask_suffixes or ["", "_mask", "_gt", "_label"]
         self.strict_pairs = strict_pairs
         self.skip_size_mismatch = skip_size_mismatch
+        self.source_group_mode = source_group_mode
+        self.source_group_patterns = source_group_patterns or []
         self.size_mismatch_records = []
         self.samples = self._build_samples()
 
@@ -99,6 +104,12 @@ class TamperDataset(Dataset):
 
         if not samples:
             raise RuntimeError("No samples remain after dataset filtering.")
+
+        for sample in samples:
+            sample.setdefault(
+                "source_group",
+                self._infer_source_group(sample["image_path"], sample["class_label"]),
+            )
 
         return samples
 
@@ -275,6 +286,34 @@ class TamperDataset(Dataset):
             return int(parts[2])
         return 0 if mask_path is None else 1
 
+    def _infer_source_group(self, image_path, class_label):
+        path = Path(image_path)
+        name = path.name
+        stem = path.stem
+
+        for rule in self.source_group_patterns:
+            group = rule.get("group")
+            if not group:
+                continue
+            if "prefix" in rule and name.startswith(str(rule["prefix"])):
+                return str(group)
+            if "suffix" in rule and name.endswith(str(rule["suffix"])):
+                return str(group)
+            if "contains" in rule and str(rule["contains"]) in name:
+                return str(group)
+            if "regex" in rule and re.search(str(rule["regex"]), name):
+                return str(group)
+
+        if self.source_group_mode == "parent":
+            return path.parent.name
+        if self.source_group_mode == "label":
+            return f"label_{int(class_label)}"
+        if self.source_group_mode == "stem_prefix":
+            return stem.split("_", maxsplit=1)[0]
+        if self.source_group_mode == "none":
+            return "default"
+        raise ValueError(f"Unsupported source_group_mode: {self.source_group_mode}")
+
     def __len__(self):
         return len(self.samples)
 
@@ -303,6 +342,7 @@ class TamperDataset(Dataset):
             "image_path": str(image_path),
             "mask_path": "null" if mask_path is None else str(mask_path),
             "class_label": class_label,
+            "source_group": sample.get("source_group", "default"),
         }
 
     @staticmethod
@@ -336,4 +376,6 @@ def build_dataset_from_split_config(split_config, transform=None, mode="test"):
         mask_suffixes=split_config.get("mask_suffixes"),
         strict_pairs=split_config.get("strict_pairs", True),
         skip_size_mismatch=split_config.get("skip_size_mismatch", mode == "train"),
+        source_group_mode=split_config.get("source_group_mode", "stem_prefix"),
+        source_group_patterns=split_config.get("source_group_patterns"),
     )

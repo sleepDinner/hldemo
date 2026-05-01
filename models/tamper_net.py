@@ -33,11 +33,16 @@ class TamperNet(nn.Module):
         hr_refine_channels=32,
         frequency_branch_type="hybrid",
         fusion_type="cross_attention",
+        decoder_dropout=0.0,
+        feature_dropout=0.0,
+        image_dropout=0.0,
+        use_image_head=True,
     ):
         super().__init__()
         self.use_frequency_branch = use_frequency_branch
         self.use_global_block = use_global_block
         self.use_hr_refine = use_hr_refine
+        self.use_image_head = use_image_head
         self.frequency_branch_type = frequency_branch_type
         self.fusion_type = fusion_type
 
@@ -64,11 +69,13 @@ class TamperNet(nn.Module):
             )
         else:
             self.global_blocks = nn.Identity()
+        self.feature_dropout = nn.Dropout2d(float(feature_dropout)) if float(feature_dropout) > 0 else nn.Identity()
 
         self.decoder = BoundaryRefinementDecoder(
             in_channels=self.rgb_backbone.out_channels,
             decoder_channels=decoder_channels,
             use_boundary_head=use_boundary_head,
+            dropout=decoder_dropout,
         )
         residual_channels = (
             self.frequency_branch.high_pass.out_channels if self.frequency_branch is not None else 0
@@ -82,10 +89,15 @@ class TamperNet(nn.Module):
             if use_hr_refine
             else None
         )
-        self.image_head = nn.Sequential(
-            nn.AdaptiveAvgPool2d(1),
-            nn.Flatten(),
-            nn.Linear(deep_channels, 1),
+        self.image_head = (
+            nn.Sequential(
+                nn.AdaptiveAvgPool2d(1),
+                nn.Flatten(),
+                nn.Dropout(float(image_dropout)) if float(image_dropout) > 0 else nn.Identity(),
+                nn.Linear(deep_channels, 1),
+            )
+            if use_image_head
+            else None
         )
 
     def forward(self, x):
@@ -109,7 +121,7 @@ class TamperNet(nn.Module):
             fused_features = rgb_features
             # fused_features are RGB-only multi-scale features.
 
-        fused_features[-1] = self.global_blocks(fused_features[-1])
+        fused_features[-1] = self.feature_dropout(self.global_blocks(fused_features[-1]))
         # fused_features[-1]: [B, 8C, H/16, W/16] after global context modeling.
 
         mask_logits, boundary_logits, coarse_mask_logits = self.decoder(
@@ -129,15 +141,16 @@ class TamperNet(nn.Module):
             mask_logits = self.hr_refine(x, mask_logits, residual=hr_residual)
             # mask_logits: [B, 1, H, W] refined at full image resolution.
 
-        image_logits = self.image_head(fused_features[-1])
-        # image_logits: [B, 1]
-
-        return {
+        outputs = {
             "mask_logits": mask_logits,
             "boundary_logits": boundary_logits,
             "coarse_mask_logits": coarse_mask_logits,
-            "image_logits": image_logits,
         }
+        if self.image_head is not None:
+            image_logits = self.image_head(fused_features[-1])
+            # image_logits: [B, 1]
+            outputs["image_logits"] = image_logits
+        return outputs
 
     def _run_frequency_branch(self, x):
         if self.frequency_branch is None:
@@ -166,4 +179,8 @@ def build_model(config):
         hr_refine_channels=model_config.get("hr_refine_channels", 32),
         frequency_branch_type=model_config.get("frequency_branch_type", "hybrid"),
         fusion_type=model_config.get("fusion_type", "cross_attention"),
+        decoder_dropout=model_config.get("decoder_dropout", 0.0),
+        feature_dropout=model_config.get("feature_dropout", 0.0),
+        image_dropout=model_config.get("image_dropout", 0.0),
+        use_image_head=model_config.get("use_image_head", True),
     )

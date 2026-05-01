@@ -48,6 +48,7 @@ class TamperLocalizationLoss(nn.Module):
         mask_pos_weight_max=20.0,
         mask_focal_alpha=0.75,
         mask_focal_gamma=2.0,
+        logit_l2_weight=0.0,
     ):
         super().__init__()
         self.mask_bce_weight = mask_bce_weight
@@ -75,6 +76,9 @@ class TamperLocalizationLoss(nn.Module):
         self.mask_focal_gamma = float(mask_focal_gamma)
         if self.mask_focal_gamma < 0.0:
             raise ValueError(f"mask_focal_gamma must be non-negative, got: {mask_focal_gamma}")
+        self.logit_l2_weight = float(logit_l2_weight)
+        if self.logit_l2_weight < 0.0:
+            raise ValueError(f"logit_l2_weight must be non-negative, got: {logit_l2_weight}")
         self.dice = DiceLoss()
 
     @staticmethod
@@ -178,6 +182,11 @@ class TamperLocalizationLoss(nn.Module):
             "loss_mask_dice": mask_dice.detach(),
         }
 
+        if self.logit_l2_weight > 0:
+            logit_l2 = mask_logits.pow(2).mean()
+            total = total + self.logit_l2_weight * logit_l2
+            losses["loss_logit_l2"] = logit_l2.detach()
+
         coarse_logits = outputs.get("coarse_mask_logits")
         if coarse_logits is not None and self.coarse_weight > 0:
             coarse_bce = F.binary_cross_entropy_with_logits(coarse_logits, mask_bce_targets)
@@ -242,4 +251,5 @@ def build_loss(config):
         mask_pos_weight_max=loss_config.get("mask_pos_weight_max", 20.0),
         mask_focal_alpha=loss_config.get("mask_focal_alpha", 0.75),
         mask_focal_gamma=loss_config.get("mask_focal_gamma", 2.0),
+        logit_l2_weight=loss_config.get("logit_l2_weight", 0.0),
     )

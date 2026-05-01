@@ -1,0 +1,15 @@
+checkpoint-epoch9.pth
+epoch: 9
+val_score: 0.32431693
+val_f1: 0.38039565
+val_iou: 0.23486949
+val_auc: 0.80568226
+val_ap: 0.39460547
+val_mcc: 0.30145910
+val_fpr: 0.09254759
+val_best_threshold: 0.60000000
+val_best_f1: 0.35712174
+val_best_iou: 0.21737565
+val_best_mcc: 0.30347143
+val_best_fpr: 0.04506696
+val_loss: 0.82622319
