@@ -280,6 +280,173 @@ def reduce_scalar(value, device):
     return float(tensor.item())
 
 
+def update_loss_component_sums(component_sums, loss_dict):
+    for key, value in loss_dict.items():
+        if key == "loss":
+            continue
+        if torch.is_tensor(value):
+            value = float(value.detach().item())
+        else:
+            value = float(value)
+        component_sums[key] = component_sums.get(key, 0.0) + value
+
+
+def finalize_loss_component_sums(prefix, component_sums, num_batches, device):
+    metrics = {}
+    denominator = max(1, num_batches)
+    for key, value in component_sums.items():
+        metric_key = f"{prefix}_{key}" if prefix else key
+        metrics[metric_key] = reduce_scalar(value / denominator, device)
+    return metrics
+
+
+def update_prediction_stat_sums(stat_sums, probs, masks, threshold):
+    probs = probs.detach().float()
+    masks = masks.detach().float()
+    hard_masks = (masks > 0.5).float()
+    stat_sums["target_fg_ratio"] = stat_sums.get("target_fg_ratio", 0.0) + float(hard_masks.mean().item())
+    stat_sums["pred_prob_mean"] = stat_sums.get("pred_prob_mean", 0.0) + float(probs.mean().item())
+    stat_sums["pred_pos_ratio"] = stat_sums.get("pred_pos_ratio", 0.0) + float((probs >= threshold).float().mean().item())
+    stat_sums["pred_prob_max_mean"] = stat_sums.get("pred_prob_max_mean", 0.0) + float(
+        probs.flatten(1).max(dim=1).values.mean().item()
+    )
+
+
+def finalize_average_sums(prefix, stat_sums, num_batches, device):
+    metrics = {}
+    denominator = max(1, num_batches)
+    for key, value in stat_sums.items():
+        metric_key = f"{prefix}_{key}" if prefix else key
+        metrics[metric_key] = reduce_scalar(value / denominator, device)
+    return metrics
+
+
+def batch_field_to_list(batch, key, batch_size, default=""):
+    value = batch.get(key)
+    if value is None:
+        return [default for _ in range(batch_size)]
+    if torch.is_tensor(value):
+        return value.detach().cpu().tolist()
+    if isinstance(value, (list, tuple)):
+        return list(value)
+    return [value for _ in range(batch_size)]
+
+
+def build_validation_diagnostic_rows(batch, probs, masks, threshold, epoch, step, rank):
+    probs = probs.detach().float().cpu()
+    masks = masks.detach().float().cpu()
+    hard_masks = masks > 0.5
+    pred_masks = probs >= threshold
+    batch_size = int(probs.shape[0])
+    image_paths = batch_field_to_list(batch, "image_path", batch_size)
+    mask_paths = batch_field_to_list(batch, "mask_path", batch_size)
+    class_labels = batch_field_to_list(batch, "class_label", batch_size, default=-1)
+
+    rows = []
+    fixed_thresholds = (0.05, 0.10, 0.30, 0.50)
+    for index in range(batch_size):
+        flat_prob = probs[index].flatten()
+        flat_target = hard_masks[index].flatten()
+        flat_pred = pred_masks[index].flatten()
+        flat_background = ~flat_target
+        pixels = int(flat_prob.numel())
+        target_pixels = int(flat_target.sum().item())
+        pred_pixels = int(flat_pred.sum().item())
+        tp = int((flat_pred & flat_target).sum().item())
+        fp = int((flat_pred & flat_background).sum().item())
+        fn = int((~flat_pred & flat_target).sum().item())
+        precision = tp / max(1, tp + fp)
+        recall = tp / max(1, tp + fn)
+        f1 = 2.0 * tp / max(1, 2 * tp + fp + fn)
+        iou = tp / max(1, tp + fp + fn)
+        fg_prob_mean = float(flat_prob[flat_target].mean().item()) if target_pixels > 0 else float("nan")
+        bg_prob_mean = float(flat_prob[flat_background].mean().item()) if target_pixels < pixels else float("nan")
+        row = {
+            "epoch": epoch,
+            "rank": rank,
+            "step": step,
+            "batch_index": index,
+            "image_path": image_paths[index],
+            "mask_path": mask_paths[index],
+            "class_label": int(class_labels[index]),
+            "pixels": pixels,
+            "target_pixels": target_pixels,
+            "target_fg_ratio": target_pixels / max(1, pixels),
+            "pred_pixels": pred_pixels,
+            "pred_pos_ratio": pred_pixels / max(1, pixels),
+            "prob_mean": float(flat_prob.mean().item()),
+            "prob_max": float(flat_prob.max().item()),
+            "fg_prob_mean": fg_prob_mean,
+            "bg_prob_mean": bg_prob_mean,
+            "tp_pixels": tp,
+            "fp_pixels": fp,
+            "fn_pixels": fn,
+            "precision": precision,
+            "recall": recall,
+            "f1": f1,
+            "iou": iou,
+        }
+        for fixed_threshold in fixed_thresholds:
+            key = f"pred_pos_ratio_t{int(round(fixed_threshold * 100)):03d}"
+            row[key] = float((flat_prob >= fixed_threshold).float().mean().item())
+        rows.append(row)
+    return rows
+
+
+def gather_diagnostic_rows(rows):
+    if not (dist.is_available() and dist.is_initialized()):
+        return rows
+
+    gathered = [None for _ in range(dist.get_world_size())]
+    dist.all_gather_object(gathered, rows)
+    merged = []
+    for rank_rows in gathered:
+        merged.extend(rank_rows or [])
+    return merged
+
+
+def save_validation_diagnostic_rows(rows, output_dir, epoch):
+    if not rows:
+        return
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    rows = sorted(rows, key=lambda row: (row["rank"], row["step"], row["batch_index"]))
+    csv_path = output_dir / f"val_epoch_{epoch:04d}_samples.csv"
+    fieldnames = [
+        "epoch",
+        "rank",
+        "step",
+        "batch_index",
+        "image_path",
+        "mask_path",
+        "class_label",
+        "pixels",
+        "target_pixels",
+        "target_fg_ratio",
+        "pred_pixels",
+        "pred_pos_ratio",
+        "pred_pos_ratio_t005",
+        "pred_pos_ratio_t010",
+        "pred_pos_ratio_t030",
+        "pred_pos_ratio_t050",
+        "prob_mean",
+        "prob_max",
+        "fg_prob_mean",
+        "bg_prob_mean",
+        "tp_pixels",
+        "fp_pixels",
+        "fn_pixels",
+        "precision",
+        "recall",
+        "f1",
+        "iou",
+    ]
+    with csv_path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
 def reduce_metric_tracker(tracker):
     if not (dist.is_available() and dist.is_initialized()):
         return tracker
@@ -355,6 +522,8 @@ def train_one_epoch(
 ):
     model.train()
     running_loss = 0.0
+    loss_component_sums = {}
+    prediction_stat_sums = {}
     num_batches = 0
     amp_enabled = config.get("training", {}).get("amp", True) and device.type == "cuda"
     log_interval = config.get("logging", {}).get("log_interval", 20)
@@ -406,6 +575,8 @@ def train_one_epoch(
 
         loss_value = float(loss.detach().item())
         running_loss += loss_value
+        update_loss_component_sums(loss_component_sums, loss_dict)
+        update_prediction_stat_sums(prediction_stat_sums, torch.sigmoid(outputs["mask_logits"]), masks, threshold)
         num_batches += 1
         avg_loss = running_loss / max(1, num_batches)
 
@@ -450,7 +621,10 @@ def train_one_epoch(
             )
 
     local_loss = running_loss / max(1, num_batches)
-    return {"train_loss": reduce_scalar(local_loss, device)}
+    metrics = {"train_loss": reduce_scalar(local_loss, device)}
+    metrics.update(finalize_loss_component_sums("train", loss_component_sums, num_batches, device))
+    metrics.update(finalize_average_sums("train", prediction_stat_sums, num_batches, device))
+    return metrics
 
 
 @torch.no_grad()
@@ -460,13 +634,19 @@ def validate(model, criterion, loader, device, epoch, config, output_dir, rank):
     max_auc_pixels = config.get("metrics", {}).get("max_auc_pixels", 200000)
     tracker = RunningBinaryMetrics(threshold=threshold, max_auc_pixels=max_auc_pixels)
     running_loss = 0.0
+    loss_component_sums = {}
+    prediction_stat_sums = {}
     num_batches = 0
 
     save_vis = config.get("logging", {}).get("save_visualizations", True)
     vis_interval = config.get("logging", {}).get("visualization_interval", 1)
     max_vis = config.get("logging", {}).get("max_visualizations", 8)
     should_save_vis = save_vis and is_main_process(rank) and epoch % vis_interval == 0
+    save_diagnostics = config.get("logging", {}).get("save_validation_diagnostics", True)
+    diagnostics_interval = max(1, int(config.get("logging", {}).get("validation_diagnostics_interval", 1)))
+    should_save_diagnostics = save_diagnostics and epoch % diagnostics_interval == 0
     saved_vis = 0
+    diagnostic_rows = []
     total_epochs = config.get("scheduler", {}).get("epochs", epoch)
     epoch_start_time = time.time()
     progress_metric_interval = max(1, int(config.get("logging", {}).get("progress_metric_interval", 20)))
@@ -492,11 +672,25 @@ def validate(model, criterion, loader, device, epoch, config, output_dir, rank):
         loss = loss_dict["loss"]
         loss_value = float(loss.detach().item())
         running_loss += loss_value
+        update_loss_component_sums(loss_component_sums, loss_dict)
         num_batches += 1
         avg_loss = running_loss / max(1, num_batches)
 
         probs = torch.sigmoid(outputs["mask_logits"])
+        update_prediction_stat_sums(prediction_stat_sums, probs, masks, threshold)
         tracker.update(probs, masks)
+        if should_save_diagnostics:
+            diagnostic_rows.extend(
+                build_validation_diagnostic_rows(
+                    batch=batch,
+                    probs=probs,
+                    masks=masks,
+                    threshold=threshold,
+                    epoch=epoch,
+                    step=step,
+                    rank=rank,
+                )
+            )
 
         if is_main_process(rank):
             if step == 1 or step % progress_metric_interval == 0 or step == len(loader):
@@ -534,14 +728,22 @@ def validate(model, criterion, loader, device, epoch, config, output_dir, rank):
             )
         )
     local_loss = running_loss / max(1, num_batches)
-    metrics["val_loss"] = reduce_scalar(local_loss, device)
+    metrics["loss"] = reduce_scalar(local_loss, device)
+    metrics.update(finalize_loss_component_sums("", loss_component_sums, num_batches, device))
+    metrics.update(finalize_average_sums("", prediction_stat_sums, num_batches, device))
+    if should_save_diagnostics:
+        diagnostic_rows = gather_diagnostic_rows(diagnostic_rows)
+        if is_main_process(rank):
+            save_validation_diagnostic_rows(diagnostic_rows, output_dir / "diagnostics", epoch)
     return {f"val_{key}": value for key, value in metrics.items()}
 
 
 def save_validation_visuals(batch, probs, config, output_dir, start_index=0, max_items=4):
     output_dir.mkdir(parents=True, exist_ok=True)
     images = batch["image"].detach().cpu()
+    masks = batch["mask"].detach().cpu()
     probs = probs.detach().cpu()
+    threshold = float(config.get("metrics", {}).get("threshold", 0.5))
     mean = torch.tensor(config["data"].get("normalize", {}).get("mean", [0.0, 0.0, 0.0])).view(3, 1, 1)
     std = torch.tensor(config["data"].get("normalize", {}).get("std", [1.0, 1.0, 1.0])).view(3, 1, 1)
 
@@ -550,8 +752,12 @@ def save_validation_visuals(batch, probs, config, output_dir, start_index=0, max
         image = (images[index] * std + mean).clamp(0.0, 1.0)
         image_array = (image.permute(1, 2, 0).numpy() * 255.0).astype("uint8")
         prob_map = probs[index, 0].numpy()
+        gt_map = masks[index, 0].numpy()
+        binary_map = (prob_map >= threshold).astype("float32")
         item_id = start_index + index
+        save_mask(gt_map, output_dir / f"{item_id:03d}_gt.png")
         save_mask(prob_map, output_dir / f"{item_id:03d}_prob.png")
+        save_mask(binary_map, output_dir / f"{item_id:03d}_binary.png")
         save_prediction_visualization(image_array, prob_map, output_dir / f"{item_id:03d}_overlay.png")
         saved += 1
     return saved

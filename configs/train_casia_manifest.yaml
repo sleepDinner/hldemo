@@ -189,3 +189,5 @@ logging:
   save_visualizations: true
   visualization_interval: 1
   max_visualizations: 8
+  save_validation_diagnostics: true
+  validation_diagnostics_interval: 1
