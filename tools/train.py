@@ -91,6 +91,18 @@ def cleanup_distributed():
         dist.destroy_process_group()
 
 
+def distributed_barrier():
+    if not (dist.is_available() and dist.is_initialized()):
+        return
+    if dist.get_backend() == "nccl" and torch.cuda.is_available():
+        try:
+            dist.barrier(device_ids=[torch.cuda.current_device()])
+            return
+        except TypeError:
+            pass
+    dist.barrier()
+
+
 def is_main_process(rank):
     return rank == 0
 
@@ -140,7 +152,7 @@ def ensure_data_split_manifests(config, logger, rank, distributed):
     if is_main_process(rank):
         ensure_stratified_split(config, logger=logger)
     if distributed:
-        dist.barrier()
+        distributed_barrier()
 
 
 def build_dataloaders(config, distributed):
@@ -297,6 +309,31 @@ def progress_metric_postfix(metrics):
         "AP": f"{metrics.get('ap', 0.0):.3f}",
         "MCC": f"{metrics.get('mcc', 0.0):.3f}",
         "FPR": f"{metrics.get('fpr', 0.0):.3f}",
+    }
+
+
+def build_threshold_search(config):
+    search_config = config.get("metrics", {}).get("threshold_search", {})
+    if not search_config.get("enabled", False):
+        return None
+
+    thresholds = search_config.get("thresholds")
+    if thresholds is None:
+        start = float(search_config.get("start", 0.05))
+        end = float(search_config.get("end", 0.95))
+        step = float(search_config.get("step", 0.05))
+        if step <= 0:
+            raise ValueError(f"threshold_search.step must be positive, got: {step}")
+        thresholds = []
+        value = start
+        while value <= end + 1e-8:
+            thresholds.append(round(value, 6))
+            value += step
+
+    return {
+        "thresholds": thresholds,
+        "optimize": search_config.get("optimize", "f1"),
+        "max_fpr": search_config.get("max_fpr"),
     }
 
 
@@ -483,6 +520,15 @@ def validate(model, criterion, loader, device, epoch, config, output_dir, rank):
 
     tracker = reduce_metric_tracker(tracker)
     metrics = tracker.compute()
+    threshold_search = build_threshold_search(config)
+    if threshold_search is not None:
+        metrics.update(
+            tracker.threshold_sweep(
+                threshold_search["thresholds"],
+                optimize=threshold_search["optimize"],
+                max_fpr=threshold_search["max_fpr"],
+            )
+        )
     local_loss = running_loss / max(1, num_batches)
     metrics["val_loss"] = reduce_scalar(local_loss, device)
     return {f"val_{key}": value for key, value in metrics.items()}
@@ -609,7 +655,20 @@ def save_best_checkpoint_record(path, checkpoint_name, epoch, monitor, metric, m
         f"{monitor}: {metric:.8f}",
     ]
     if metrics:
-        for key in ["val_f1", "val_iou", "val_auc", "val_ap", "val_mcc", "val_fpr", "val_loss"]:
+        for key in [
+            "val_f1",
+            "val_iou",
+            "val_auc",
+            "val_ap",
+            "val_mcc",
+            "val_fpr",
+            "val_best_threshold",
+            "val_best_f1",
+            "val_best_iou",
+            "val_best_mcc",
+            "val_best_fpr",
+            "val_loss",
+        ]:
             if key in metrics:
                 lines.append(f"{key}: {float(metrics[key]):.8f}")
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -813,56 +872,28 @@ def main():
             add_selection_metric(epoch_metrics, config)
             history.append(epoch_metrics)
             stop_training = False
+            is_best = False
+            current_metric = epoch_metrics.get(monitor)
 
             if is_main_process(rank):
                 logger.info("epoch=%d metrics=%s", epoch, epoch_metrics)
-                write_tensorboard(writer, epoch_metrics, epoch)
-                save_training_curves(history, curve_dir)
-
-                current_metric = epoch_metrics.get(monitor)
                 if current_metric is None:
                     raise KeyError(f"Monitor metric '{monitor}' not found in metrics: {epoch_metrics.keys()}")
-                if (
-                    monitor == config.get("checkpoint", {}).get("selection", {}).get("name", "val_score")
-                    and epoch_metrics.get(f"{monitor}_eligible") == 0.0
-                ):
+                selection_config = config.get("checkpoint", {}).get("selection", {})
+                if monitor == selection_config.get("name", "val_score") and epoch_metrics.get(f"{monitor}_eligible") == 0.0:
+                    fpr_key = selection_config.get("fpr_key", "val_fpr")
                     logger.info(
-                        "epoch=%d is not eligible for best checkpoint because val_fpr=%.6f exceeds max_fpr=%.6f",
+                        "epoch=%d is not eligible for best checkpoint because %s=%.6f exceeds max_fpr=%.6f",
                         epoch,
-                        float(epoch_metrics.get("val_fpr", 0.0)),
-                        float(config.get("checkpoint", {}).get("selection", {}).get("max_fpr", DEFAULT_SELECTION_MAX_FPR)),
+                        fpr_key,
+                        float(epoch_metrics.get(fpr_key, 0.0)),
+                        float(selection_config.get("max_fpr", DEFAULT_SELECTION_MAX_FPR)),
                     )
 
                 is_best = metric_is_better(current_metric, best_metric, mode, min_delta=min_delta)
                 if is_best:
                     best_metric = current_metric
                     best_epoch = epoch
-
-                checkpoint_path = checkpoint_dir / f"checkpoint-epoch{epoch}.pth"
-                logger.info("saving epoch checkpoint: %s", checkpoint_path)
-                save_training_checkpoint(
-                    checkpoint_path,
-                    model,
-                    optimizer,
-                    scheduler,
-                    scaler,
-                    epoch,
-                    best_metric,
-                    config,
-                    metrics=epoch_metrics,
-                )
-                logger.info("saved epoch checkpoint: %s", checkpoint_path)
-                if is_best:
-                    best_record_path = checkpoint_dir / "best_checkpoint.txt"
-                    save_best_checkpoint_record(
-                        best_record_path,
-                        checkpoint_path.name,
-                        epoch,
-                        monitor,
-                        current_metric,
-                        metrics=epoch_metrics,
-                    )
-                    logger.info("updated best checkpoint record: %s", best_record_path)
 
                 if should_stop_early(epoch, best_epoch, config):
                     logger.info(
@@ -879,11 +910,49 @@ def main():
                 dist.broadcast(stop_tensor, src=0)
                 stop_training = bool(stop_tensor.item())
 
+            if is_main_process(rank):
+                write_tensorboard(writer, epoch_metrics, epoch)
+                save_training_curves(history, curve_dir)
+
+                checkpoint_path = checkpoint_dir / f"checkpoint-epoch{epoch}.pth"
+                save_start_time = time.time()
+                logger.info("saving epoch checkpoint: %s", checkpoint_path)
+                save_training_checkpoint(
+                    checkpoint_path,
+                    model,
+                    optimizer,
+                    scheduler,
+                    scaler,
+                    epoch,
+                    best_metric,
+                    config,
+                    metrics=epoch_metrics,
+                )
+                logger.info(
+                    "saved epoch checkpoint: %s duration=%s",
+                    checkpoint_path,
+                    format_duration(time.time() - save_start_time),
+                )
+                if is_best:
+                    best_record_path = checkpoint_dir / "best_checkpoint.txt"
+                    save_best_checkpoint_record(
+                        best_record_path,
+                        checkpoint_path.name,
+                        epoch,
+                        monitor,
+                        current_metric,
+                        metrics=epoch_metrics,
+                    )
+                    logger.info("updated best checkpoint record: %s", best_record_path)
+
+            if distributed:
+                distributed_barrier()
+
             if stop_training:
                 break
 
             if distributed and config.get("training", {}).get("sync_after_epoch", False):
-                dist.barrier()
+                distributed_barrier()
     finally:
         if writer is not None:
             writer.close()

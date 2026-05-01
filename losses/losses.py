@@ -42,6 +42,12 @@ class TamperLocalizationLoss(nn.Module):
         bce_label_smoothing=0.0,
         boundary_label_smoothing=None,
         image_label_smoothing=None,
+        mask_bce_mode="bce",
+        mask_pos_weight=None,
+        mask_pos_weight_auto=False,
+        mask_pos_weight_max=20.0,
+        mask_focal_alpha=0.75,
+        mask_focal_gamma=2.0,
     ):
         super().__init__()
         self.mask_bce_weight = mask_bce_weight
@@ -59,6 +65,16 @@ class TamperLocalizationLoss(nn.Module):
         self.image_label_smoothing = self._normalize_smoothing(
             bce_label_smoothing if image_label_smoothing is None else image_label_smoothing
         )
+        self.mask_bce_mode = str(mask_bce_mode).lower()
+        if self.mask_bce_mode not in {"bce", "focal"}:
+            raise ValueError(f"Unsupported mask_bce_mode: {mask_bce_mode}")
+        self.mask_pos_weight = self._normalize_optional_positive(mask_pos_weight, "mask_pos_weight")
+        self.mask_pos_weight_auto = bool(mask_pos_weight_auto)
+        self.mask_pos_weight_max = self._normalize_optional_positive(mask_pos_weight_max, "mask_pos_weight_max")
+        self.mask_focal_alpha = self._normalize_optional_probability(mask_focal_alpha, "mask_focal_alpha")
+        self.mask_focal_gamma = float(mask_focal_gamma)
+        if self.mask_focal_gamma < 0.0:
+            raise ValueError(f"mask_focal_gamma must be non-negative, got: {mask_focal_gamma}")
         self.dice = DiceLoss()
 
     @staticmethod
@@ -75,6 +91,24 @@ class TamperLocalizationLoss(nn.Module):
         return targets * (1.0 - smoothing) + (1.0 - targets) * smoothing
 
     @staticmethod
+    def _normalize_optional_positive(value, name):
+        if value is None:
+            return None
+        value = float(value)
+        if value <= 0.0:
+            raise ValueError(f"{name} must be positive when set, got: {value}")
+        return value
+
+    @staticmethod
+    def _normalize_optional_probability(value, name):
+        if value is None:
+            return None
+        value = float(value)
+        if value < 0.0 or value > 1.0:
+            raise ValueError(f"{name} must be in [0, 1] when set, got: {value}")
+        return value
+
+    @staticmethod
     def _build_image_targets(mask_targets):
         """Build image-level labels from pixel masks.
 
@@ -86,12 +120,55 @@ class TamperLocalizationLoss(nn.Module):
         foreground_ratio = (mask_targets > 0.5).float().flatten(1).mean(dim=1, keepdim=True)
         return (foreground_ratio > 1e-6).float()
 
+    @staticmethod
+    def _format_pos_weight(logits, value):
+        if not torch.is_tensor(value):
+            value = logits.new_tensor(value)
+        value = value.to(device=logits.device, dtype=logits.dtype)
+        return value.reshape((1,) * max(1, logits.dim() - 1))
+
+    def _mask_pos_weight_tensor(self, logits, hard_targets):
+        if self.mask_pos_weight is not None:
+            return self._format_pos_weight(logits, self.mask_pos_weight)
+        if not self.mask_pos_weight_auto:
+            return None
+
+        hard_targets = (hard_targets > 0.5).float()
+        positives = hard_targets.sum()
+        if float(positives.detach().item()) <= 0.0:
+            return None
+
+        negatives = hard_targets.numel() - positives
+        pos_weight = negatives / positives.clamp_min(1.0)
+        if self.mask_pos_weight_max is not None:
+            pos_weight = pos_weight.clamp(max=self.mask_pos_weight_max)
+        return self._format_pos_weight(logits, pos_weight.detach())
+
+    def _mask_bce_loss(self, logits, targets, hard_targets):
+        pos_weight = self._mask_pos_weight_tensor(logits, hard_targets)
+        bce = F.binary_cross_entropy_with_logits(
+            logits,
+            targets,
+            pos_weight=pos_weight,
+            reduction="none",
+        )
+        if self.mask_bce_mode == "bce":
+            return bce.mean()
+
+        probs = torch.sigmoid(logits)
+        prob_t = probs * targets + (1.0 - probs) * (1.0 - targets)
+        focal_weight = (1.0 - prob_t).clamp_min(0.0).pow(self.mask_focal_gamma)
+        if self.mask_focal_alpha is not None:
+            alpha_t = self.mask_focal_alpha * targets + (1.0 - self.mask_focal_alpha) * (1.0 - targets)
+            focal_weight = focal_weight * alpha_t
+        return (bce * focal_weight).mean()
+
     def forward(self, outputs, targets, return_dict=False):
         mask_targets = targets["mask"].float()
         mask_logits = outputs["mask_logits"]
         mask_bce_targets = self._smooth_binary_targets(mask_targets, self.bce_label_smoothing)
 
-        mask_bce = F.binary_cross_entropy_with_logits(mask_logits, mask_bce_targets)
+        mask_bce = self._mask_bce_loss(mask_logits, mask_bce_targets, mask_targets)
         mask_dice = self.dice(mask_logits, mask_targets)
         total = self.mask_bce_weight * mask_bce + self.dice_weight * mask_dice
 
@@ -159,4 +236,10 @@ def build_loss(config):
         bce_label_smoothing=loss_config.get("bce_label_smoothing", 0.0),
         boundary_label_smoothing=loss_config.get("boundary_label_smoothing"),
         image_label_smoothing=loss_config.get("image_label_smoothing"),
+        mask_bce_mode=loss_config.get("mask_bce_mode", "bce"),
+        mask_pos_weight=loss_config.get("mask_pos_weight"),
+        mask_pos_weight_auto=loss_config.get("mask_pos_weight_auto", False),
+        mask_pos_weight_max=loss_config.get("mask_pos_weight_max", 20.0),
+        mask_focal_alpha=loss_config.get("mask_focal_alpha", 0.75),
+        mask_focal_gamma=loss_config.get("mask_focal_gamma", 2.0),
     )

@@ -300,6 +300,10 @@ class TamperPairTransform:
         std=None,
         size_mismatch_policy="resize_mask",
         robust_augmentation=None,
+        foreground_crop_prob=0.0,
+        foreground_crop_min_ratio=0.0,
+        foreground_crop_max_retries=10,
+        foreground_crop_threshold=127,
     ):
         self.input_size = self._as_hw(input_size)
         self.mode = mode
@@ -311,6 +315,10 @@ class TamperPairTransform:
         self.std = torch.tensor(std or [1.0, 1.0, 1.0], dtype=torch.float32).view(3, 1, 1)
         self.size_mismatch_policy = size_mismatch_policy
         self.robust_augmentation = robust_augmentation or RobustImageAugmentation(enabled=False)
+        self.foreground_crop_prob = float(foreground_crop_prob)
+        self.foreground_crop_min_ratio = float(foreground_crop_min_ratio)
+        self.foreground_crop_max_retries = max(1, int(foreground_crop_max_retries))
+        self.foreground_crop_threshold = int(foreground_crop_threshold)
 
     def set_epoch(self, epoch):
         if hasattr(self.robust_augmentation, "set_epoch"):
@@ -357,7 +365,10 @@ class TamperPairTransform:
     def _train_transform(self, image, mask):
         if self.random_crop:
             image, mask = self._pad_if_needed(image, mask, self.crop_size)
-            image, mask = self._random_crop_pair(image, mask, self.crop_size)
+            if self._should_use_foreground_crop(mask):
+                image, mask = self._foreground_crop_pair(image, mask, self.crop_size)
+            else:
+                image, mask = self._random_crop_pair(image, mask, self.crop_size)
 
         if random.random() < self.hflip_prob:
             image = image.transpose(FLIP_LEFT_RIGHT)
@@ -403,6 +414,43 @@ class TamperPairTransform:
         box = (left, top, left + crop_w, top + crop_h)
         return image.crop(box), mask.crop(box)
 
+    def _should_use_foreground_crop(self, mask):
+        if self.foreground_crop_prob <= 0.0 or random.random() >= self.foreground_crop_prob:
+            return False
+        return bool((np.asarray(mask) > self.foreground_crop_threshold).any())
+
+    def _foreground_crop_pair(self, image, mask, crop_size):
+        crop_h, crop_w = crop_size
+        width, height = image.size
+        if width == crop_w and height == crop_h:
+            return image, mask
+
+        mask_array = np.asarray(mask)
+        foreground = np.argwhere(mask_array > self.foreground_crop_threshold)
+        if foreground.size == 0:
+            return self._random_crop_pair(image, mask, crop_size)
+
+        min_pixels = max(1, int(round(crop_h * crop_w * self.foreground_crop_min_ratio)))
+        for _ in range(self.foreground_crop_max_retries):
+            y, x = foreground[random.randrange(len(foreground))]
+            left_min = max(0, int(x) - crop_w + 1)
+            left_max = min(int(x), width - crop_w)
+            top_min = max(0, int(y) - crop_h + 1)
+            top_max = min(int(y), height - crop_h)
+            if left_min > left_max or top_min > top_max:
+                continue
+
+            left = random.randint(left_min, left_max)
+            top = random.randint(top_min, top_max)
+            box = (left, top, left + crop_w, top + crop_h)
+            cropped_mask = mask.crop(box)
+            if self.foreground_crop_min_ratio <= 0.0:
+                return image.crop(box), cropped_mask
+            if int((np.asarray(cropped_mask) > self.foreground_crop_threshold).sum()) >= min_pixels:
+                return image.crop(box), cropped_mask
+
+        return self._random_crop_pair(image, mask, crop_size)
+
     @staticmethod
     def _resize_pair(image, mask, output_size):
         height, width = output_size
@@ -437,4 +485,8 @@ def build_transforms(config, mode):
         std=normalize.get("std"),
         size_mismatch_policy=data_config.get("size_mismatch_policy", "resize_mask"),
         robust_augmentation=RobustImageAugmentation(**robust_config),
+        foreground_crop_prob=augment_config.get("foreground_crop_prob", 0.0),
+        foreground_crop_min_ratio=augment_config.get("foreground_crop_min_ratio", 0.0),
+        foreground_crop_max_retries=augment_config.get("foreground_crop_max_retries", 10),
+        foreground_crop_threshold=augment_config.get("foreground_crop_threshold", 127),
     )

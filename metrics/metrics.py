@@ -80,6 +80,24 @@ def binary_metrics(pred_probs, targets, threshold=0.5):
     return tracker.compute()
 
 
+def _confusion_metrics(tp, fp, tn, fn):
+    precision = _safe_divide(tp, tp + fp)
+    recall = _safe_divide(tp, tp + fn)
+    f1 = _safe_divide(2.0 * precision * recall, precision + recall)
+    iou = _safe_divide(tp, tp + fp + fn)
+    fpr = _safe_divide(fp, fp + tn)
+    mcc_den = _mcc_denominator(tp, fp, tn, fn)
+    mcc = _safe_divide(tp * tn - fp * fn, mcc_den)
+    return {
+        "f1": f1,
+        "iou": iou,
+        "precision": precision,
+        "recall": recall,
+        "mcc": mcc,
+        "fpr": fpr,
+    }
+
+
 class RunningBinaryMetrics:
     """Streaming pixel-level metrics for binary tamper masks."""
 
@@ -241,30 +259,63 @@ class RunningBinaryMetrics:
             self._store_auc_samples(scores, targets)
 
     def compute(self):
-        precision = _safe_divide(self.tp, self.tp + self.fp)
-        recall = _safe_divide(self.tp, self.tp + self.fn)
-        f1 = _safe_divide(2.0 * precision * recall, precision + recall)
-        iou = _safe_divide(self.tp, self.tp + self.fp + self.fn)
-        fpr = _safe_divide(self.fp, self.fp + self.tn)
-        mcc_den = _mcc_denominator(self.tp, self.fp, self.tn, self.fn)
-        mcc = _safe_divide(self.tp * self.tn - self.fp * self.fn, mcc_den)
+        metrics = _confusion_metrics(self.tp, self.fp, self.tn, self.fn)
         auc = self._compute_auc()
         ap = self._compute_ap()
 
+        metrics.update(
+            {
+                "auc": auc,
+                "ap": ap,
+            }
+        )
+        return metrics
+
+    def threshold_sweep(self, thresholds, optimize="f1", max_fpr=None):
+        scores, targets = self._stored_samples()
+        if scores.size == 0:
+            return {}
+
+        thresholds = [float(threshold) for threshold in thresholds]
+        if not thresholds:
+            return {}
+
+        best = None
+        fallback = None
+        max_fpr = None if max_fpr is None else float(max_fpr)
+        for threshold in thresholds:
+            preds = (scores >= threshold).astype(np.uint8)
+            tp = int(((preds == 1) & (targets == 1)).sum())
+            fp = int(((preds == 1) & (targets == 0)).sum())
+            tn = int(((preds == 0) & (targets == 0)).sum())
+            fn = int(((preds == 0) & (targets == 1)).sum())
+            metrics = _confusion_metrics(tp, fp, tn, fn)
+            metrics["threshold"] = threshold
+
+            if fallback is None or metrics.get(optimize, 0.0) > fallback.get(optimize, 0.0):
+                fallback = metrics
+            if max_fpr is not None and metrics["fpr"] > max_fpr:
+                continue
+            if best is None or metrics.get(optimize, 0.0) > best.get(optimize, 0.0):
+                best = metrics
+
+        selected = best if best is not None else fallback
+        if selected is None:
+            return {}
         return {
-            "f1": f1,
-            "iou": iou,
-            "auc": auc,
-            "ap": ap,
-            "precision": precision,
-            "recall": recall,
-            "mcc": mcc,
-            "fpr": fpr,
+            "best_threshold": selected["threshold"],
+            "best_f1": selected["f1"],
+            "best_iou": selected["iou"],
+            "best_precision": selected["precision"],
+            "best_recall": selected["recall"],
+            "best_mcc": selected["mcc"],
+            "best_fpr": selected["fpr"],
+            "threshold_search_eligible": 1.0 if best is not None else 0.0,
         }
 
-    def _compute_auc(self):
+    def _stored_samples(self):
         if self._auc_count == 0:
-            return 0.0
+            return np.empty(0, dtype=np.float32), np.empty(0, dtype=np.uint8)
 
         if self.max_auc_pixels is None:
             scores = np.concatenate(self._auc_scores, axis=0)
@@ -272,21 +323,21 @@ class RunningBinaryMetrics:
         else:
             scores = self._auc_scores[: self._auc_count]
             targets = self._auc_targets[: self._auc_count]
+        return scores, targets
+
+    def _compute_auc(self):
+        scores, targets = self._stored_samples()
+        if scores.size == 0:
+            return 0.0
         try:
             return _roc_auc_score(targets, scores)
         except ValueError:
             return 0.0
 
     def _compute_ap(self):
-        if self._auc_count == 0:
+        scores, targets = self._stored_samples()
+        if scores.size == 0:
             return 0.0
-
-        if self.max_auc_pixels is None:
-            scores = np.concatenate(self._auc_scores, axis=0)
-            targets = np.concatenate(self._auc_targets, axis=0)
-        else:
-            scores = self._auc_scores[: self._auc_count]
-            targets = self._auc_targets[: self._auc_count]
         try:
             return _average_precision_score(targets, scores)
         except ValueError:
